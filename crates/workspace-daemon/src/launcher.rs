@@ -469,7 +469,11 @@ fn worst_misplaced<'d>(
 
 fn dominant_direction(dx: i64, dy: i64) -> MoveDir {
     if dx.abs() >= dy.abs() {
-        if dx < 0 { MoveDir::Left } else { MoveDir::Right }
+        if dx < 0 {
+            MoveDir::Left
+        } else {
+            MoveDir::Right
+        }
     } else if dy < 0 {
         MoveDir::Up
     } else {
@@ -490,8 +494,16 @@ fn distance2(a: (i32, i32), b: (i32, i32)) -> i64 {
 fn bounding_box(rects: &[TargetRectAbs]) -> TargetRectAbs {
     let left = rects.iter().map(|((x, _), _)| *x).min().unwrap_or(0);
     let top = rects.iter().map(|((_, y), _)| *y).min().unwrap_or(0);
-    let right = rects.iter().map(|((x, _), (w, _))| x + w).max().unwrap_or(0);
-    let bottom = rects.iter().map(|((_, y), (_, h))| y + h).max().unwrap_or(0);
+    let right = rects
+        .iter()
+        .map(|((x, _), (w, _))| x + w)
+        .max()
+        .unwrap_or(0);
+    let bottom = rects
+        .iter()
+        .map(|((_, y), (_, h))| y + h)
+        .max()
+        .unwrap_or(0);
     ((left, top), (right - left, bottom - top))
 }
 
@@ -578,8 +590,10 @@ fn next_action<'d>(
     ]);
     let live_bb = bounding_box(&[(at, size), (neighbor_at, neighbor_live_size)]);
     let bb_tolerance = i64::from(want_bb.1.0.min(want_bb.1.1) / 4).pow(2);
-    let bb_matches = distance2(center_of(want_bb.0, want_bb.1), center_of(live_bb.0, live_bb.1))
-        <= bb_tolerance
+    let bb_matches = distance2(
+        center_of(want_bb.0, want_bb.1),
+        center_of(live_bb.0, live_bb.1),
+    ) <= bb_tolerance
         && distance2(want_bb.1, live_bb.1) <= bb_tolerance;
     if bb_matches {
         return Some(LayoutAction::ToggleSplit(address));
@@ -968,10 +982,26 @@ mod tests {
         // relative to where they actually opened.
         let spot = |x, y, w, h| ((x + w / 2, y + h / 2), (w, h));
         let targets = vec![
-            ("a".to_owned(), identity_group(&identity("Alacritty")), spot(0, 0, 800, 700)),
-            ("b".to_owned(), identity_group(&identity("Alacritty")), spot(0, 700, 800, 700)),
-            ("c".to_owned(), identity_group(&identity("Alacritty")), spot(800, 0, 800, 1400)),
-            ("d".to_owned(), identity_group(&identity("code")), spot(1600, 0, 800, 1400)),
+            (
+                "a".to_owned(),
+                identity_group(&identity("Alacritty")),
+                spot(0, 0, 800, 700),
+            ),
+            (
+                "b".to_owned(),
+                identity_group(&identity("Alacritty")),
+                spot(0, 700, 800, 700),
+            ),
+            (
+                "c".to_owned(),
+                identity_group(&identity("Alacritty")),
+                spot(800, 0, 800, 1400),
+            ),
+            (
+                "d".to_owned(),
+                identity_group(&identity("code")),
+                spot(1600, 0, 800, 1400),
+            ),
         ];
         // Live: consoles a/b/c sit in each other's captured spots; code is
         // in place. With re-dealt targets nothing needs to move at all.

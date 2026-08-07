@@ -529,7 +529,10 @@ fn open_row_menu(
         UiRequest::Save(slug.clone()),
     ));
     menu.append(&action_button("Restore", UiRequest::Restore(slug.clone())));
-    menu.append(&action_button("Close windows", UiRequest::Close(slug.clone())));
+    menu.append(&action_button(
+        "Close windows",
+        UiRequest::Close(slug.clone()),
+    ));
 
     // Apps…: the per-slot launch settings window.
     let apps = gtk::Button::with_label("Apps…");

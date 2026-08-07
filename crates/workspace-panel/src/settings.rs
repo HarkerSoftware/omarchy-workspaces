@@ -40,12 +40,7 @@ pub struct Open {
 }
 
 /// Open the settings window for a project and request its definition.
-pub fn open(
-    slug: &str,
-    name: &str,
-    requests: &async_channel::Sender<UiRequest>,
-    shared: &Shared,
-) {
+pub fn open(slug: &str, name: &str, requests: &async_channel::Sender<UiRequest>, shared: &Shared) {
     // Re-presenting an existing window beats stacking a second one. The
     // borrow must be released before touching the window: `close()` emits
     // `close_request` synchronously, whose handler borrows this same cell —
@@ -119,7 +114,9 @@ pub fn open(
             // `close_request` handler.
             let window = {
                 let borrowed = shared.borrow();
-                let Some(open) = borrowed.as_ref() else { return };
+                let Some(open) = borrowed.as_ref() else {
+                    return;
+                };
                 for row in open.rows.borrow().iter() {
                     let _ = open.requests.send_blocking(UiRequest::UpdateSlot {
                         slug: open.slug.clone(),
@@ -180,8 +177,7 @@ impl Open {
             );
             return;
         }
-        self.status
-            .set_label("Launch settings for each saved app:");
+        self.status.set_label("Launch settings for each saved app:");
 
         for app in &apps {
             let Some(slot_id) = app.get("slot_id").and_then(|v| v.as_str()) else {
@@ -264,12 +260,12 @@ impl Open {
             .cloned()
             .unwrap_or_default();
         if apps.is_empty() {
-            self.status.set_label(
-                "Nothing detected — the project has no windows open right now.",
-            );
+            self.status
+                .set_label("Nothing detected — the project has no windows open right now.");
             return;
         }
-        self.status.set_label("Detected from open windows — review and save:");
+        self.status
+            .set_label("Detected from open windows — review and save:");
 
         let rows = self.rows.borrow();
         let mut used = vec![false; apps.len()];
@@ -281,7 +277,9 @@ impl Open {
                         .and_then(|v| v.as_str())
                         .is_some_and(|class| class.eq_ignore_ascii_case(&row.class))
             });
-            let Some((index, app)) = matched else { continue };
+            let Some((index, app)) = matched else {
+                continue;
+            };
             used[index] = true;
             let Some(launch) = app.get("launch") else {
                 continue;

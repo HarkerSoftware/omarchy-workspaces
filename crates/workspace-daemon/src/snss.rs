@@ -53,12 +53,7 @@ fn latest_session_file(profile_dir: &Path) -> Option<std::path::PathBuf> {
     std::fs::read_dir(profile_dir.join("Sessions"))
         .ok()?
         .flatten()
-        .filter(|entry| {
-            entry
-                .file_name()
-                .to_string_lossy()
-                .starts_with("Session_")
-        })
+        .filter(|entry| entry.file_name().to_string_lossy().starts_with("Session_"))
         .max_by_key(|entry| {
             entry
                 .metadata()
@@ -356,10 +351,22 @@ mod tests {
             command(SET_TAB_WINDOW, &pair(2, 20)),
             command(SET_TAB_INDEX_IN_WINDOW, &pair(10, 0)),
             command(SET_TAB_INDEX_IN_WINDOW, &pair(11, 1)),
-            command(UPDATE_TAB_NAVIGATION, &navigation(10, 0, "https://old.example", "Old")),
-            command(UPDATE_TAB_NAVIGATION, &navigation(10, 1, "https://docs.example", "Docs")),
-            command(UPDATE_TAB_NAVIGATION, &navigation(11, 0, "https://mail.example", "Mail")),
-            command(UPDATE_TAB_NAVIGATION, &navigation(20, 0, "https://gone.example", "Gone")),
+            command(
+                UPDATE_TAB_NAVIGATION,
+                &navigation(10, 0, "https://old.example", "Old"),
+            ),
+            command(
+                UPDATE_TAB_NAVIGATION,
+                &navigation(10, 1, "https://docs.example", "Docs"),
+            ),
+            command(
+                UPDATE_TAB_NAVIGATION,
+                &navigation(11, 0, "https://mail.example", "Mail"),
+            ),
+            command(
+                UPDATE_TAB_NAVIGATION,
+                &navigation(20, 0, "https://gone.example", "Gone"),
+            ),
             command(SET_SELECTED_NAVIGATION_INDEX, &pair(10, 1)),
             command(SET_SELECTED_TAB_IN_INDEX, &pair(1, 0)),
             command(WINDOW_CLOSED, &2i32.to_le_bytes()),
@@ -385,9 +392,7 @@ mod tests {
     #[test]
     fn title_matching_survives_unread_prefix_and_suffix() {
         let windows = open_windows(&two_window_session());
-        let tabs = |title: &str| {
-            match_window(&windows, title).map(|w| w.tabs.len())
-        };
+        let tabs = |title: &str| match_window(&windows, title).map(|w| w.tabs.len());
         assert_eq!(tabs("Docs - Chromium"), Some(2));
         assert_eq!(tabs("(7) Docs - Chromium"), Some(2)); // unread drift
         assert_eq!(tabs("Mail - Chromium"), Some(2)); // background tab still matches
@@ -400,8 +405,14 @@ mod tests {
         let mut commands = vec![
             command(SET_TAB_WINDOW, &pair(1, 10)),
             command(SET_TAB_WINDOW, &pair(2, 20)),
-            command(UPDATE_TAB_NAVIGATION, &navigation(10, 0, "https://a.example", "A")),
-            command(UPDATE_TAB_NAVIGATION, &navigation(20, 0, "https://b.example", "B")),
+            command(
+                UPDATE_TAB_NAVIGATION,
+                &navigation(10, 0, "https://a.example", "A"),
+            ),
+            command(
+                UPDATE_TAB_NAVIGATION,
+                &navigation(20, 0, "https://b.example", "B"),
+            ),
         ];
         let windows = open_windows(&session(&std::mem::take(&mut commands)));
         assert_eq!(windows.len(), 2);

@@ -860,7 +860,10 @@ class = "firefox"
     // deliberately out of reach.
     fake.set_response(
         "j/clients",
-        &CLIENTS_JSON.replace(r#""workspace": {"id": 1, "name": "1"}"#, r#""workspace": {"id": -100, "name": "dev"}"#),
+        &CLIENTS_JSON.replace(
+            r#""workspace": {"id": 1, "name": "1"}"#,
+            r#""workspace": {"id": -100, "name": "dev"}"#,
+        ),
     )
     .await;
     fake.set_response("j/workspaces", WORKSPACES_JSON).await;
