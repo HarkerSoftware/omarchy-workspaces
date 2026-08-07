@@ -21,5 +21,8 @@ workspace-hypr = { workspace = true }
 workspace-proto = { workspace = true }
 workspace-storage = { workspace = true }
 
+[dev-dependencies]
+tempfile = { workspace = true }
+
 [lints]
 workspace = true

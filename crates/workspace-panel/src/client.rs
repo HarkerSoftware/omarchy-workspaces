@@ -11,7 +11,7 @@ use std::time::Duration;
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::UnixStream;
 use workspace_proto::{
-    ProjectSummary, Request, RequestEnvelope, ServerMessage, Snapshot, PROTOCOL_VERSION,
+    PROTOCOL_VERSION, ProjectSummary, Request, RequestEnvelope, ServerMessage, Snapshot,
 };
 
 /// Messages from the connection thread to the UI.

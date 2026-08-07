@@ -3,6 +3,7 @@
 mod client;
 mod commands;
 mod doctor;
+mod panel;
 
 use std::path::PathBuf;
 
@@ -91,6 +92,11 @@ enum Command {
     Rules {
         #[command(subcommand)]
         cmd: RulesCmd,
+    },
+    /// Enable or disable the desktop side panel.
+    Panel {
+        #[command(subcommand)]
+        cmd: PanelCmd,
     },
     /// Daemon management.
     Daemon {
@@ -184,6 +190,16 @@ enum RulesCmd {
 }
 
 #[derive(Subcommand)]
+enum PanelCmd {
+    /// Install autostart + layer rules and start the panel now.
+    Enable,
+    /// Remove the integration and stop the panel.
+    Disable,
+    /// Report the integration state.
+    Status,
+}
+
+#[derive(Subcommand)]
 enum DaemonCmd {
     /// Re-read config.toml and rules.toml without restarting.
     Reload,
@@ -211,6 +227,11 @@ async fn main() -> std::process::ExitCode {
         Command::Rules {
             cmd: RulesCmd::Test { address },
         } => commands::rules_test(cli.socket, address, cli.json).await,
+        Command::Panel { cmd } => match cmd {
+            PanelCmd::Enable => panel::enable().await,
+            PanelCmd::Disable => panel::disable().await,
+            PanelCmd::Status => panel::status(),
+        },
         Command::Daemon {
             cmd: DaemonCmd::Reload,
         } => commands::daemon_reload(cli.socket).await,

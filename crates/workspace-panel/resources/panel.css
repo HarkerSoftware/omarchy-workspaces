@@ -1,8 +1,9 @@
-/* Base panel styling. Milestone M-P2 replaces the hardcoded palette with
- * colors generated from the current Omarchy theme. */
+/* Structural styling. Colors come from @define-color definitions generated
+ * from the current Omarchy theme (see theme.rs); the names below always
+ * exist because the generator falls back to a built-in palette. */
 
 window#workspace-panel {
-  background-color: rgba(26, 27, 38, 0.92); /* tokyo-night bg, blur-friendly */
+  background-color: alpha(@panel_bg, 0.92);
 }
 
 .rail {
@@ -14,37 +15,49 @@ window#workspace-panel {
 }
 
 .project-row {
-  padding: 6px 0;
+  padding: 6px 8px;
   margin: 2px 6px;
   border-radius: 8px;
   transition: background-color 120ms ease;
 }
 
 .project-row:hover {
-  background-color: rgba(255, 255, 255, 0.08);
+  background-color: alpha(@panel_fg, 0.10);
 }
 
 .project-row.active {
-  background-color: rgba(122, 162, 247, 0.25); /* accent tint */
+  background-color: alpha(@panel_accent, 0.25);
 }
 
 .avatar {
   min-width: 32px;
   min-height: 32px;
   border-radius: 16px;
-  background-color: rgba(122, 162, 247, 0.35);
-  color: #c0caf5;
+  background-color: alpha(@panel_accent, 0.35);
+  color: @panel_fg;
   font-weight: 700;
   font-size: 12px;
 }
 
 .project-row.active .avatar {
-  background-color: #7aa2f7;
-  color: #1a1b26;
+  background-color: @panel_accent;
+  color: @panel_bg;
+}
+
+.row-label {
+  color: @panel_fg;
+  font-weight: 600;
+  margin-left: 10px;
+}
+
+.row-sub {
+  color: alpha(@panel_fg, 0.6);
+  font-size: 11px;
+  margin-left: 10px;
 }
 
 .status {
-  color: #f7768e;
+  color: @panel_danger;
   font-weight: 700;
   font-size: 18px;
   margin-top: 8px;
