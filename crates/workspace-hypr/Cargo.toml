@@ -1,0 +1,25 @@
+[package]
+name = "workspace-hypr"
+description = "Async Hyprland IPC client (control socket and event stream) for omarchy-workspaces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[features]
+# Scripted fake Hyprland server for integration tests.
+fake = []
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+thiserror = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+
+[dev-dependencies]
+tempfile = { workspace = true }
+
+[lints]
+workspace = true

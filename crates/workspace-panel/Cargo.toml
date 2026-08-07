@@ -1,0 +1,21 @@
+[package]
+name = "workspace-panel"
+description = "GTK4 layer-shell sidebar panel for omarchy-workspaces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "workspace-panel"
+path = "src/main.rs"
+
+# gtk4 + gtk4-layer-shell dependencies are added in milestone M-P1 to keep
+# early builds fast; until then this is a stub binary.
+[dependencies]
+anyhow = { workspace = true }
+workspace-proto = { workspace = true }
+
+[lints]
+workspace = true

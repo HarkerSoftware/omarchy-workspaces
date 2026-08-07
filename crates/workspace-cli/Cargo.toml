@@ -1,0 +1,24 @@
+[package]
+name = "workspace-cli"
+description = "The `workspace` CLI for omarchy-workspaces"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+rust-version.workspace = true
+
+[[bin]]
+name = "workspace"
+path = "src/main.rs"
+
+[dependencies]
+anyhow = { workspace = true }
+clap = { workspace = true }
+serde_json = { workspace = true }
+tokio = { workspace = true }
+workspace-core = { workspace = true }
+workspace-proto = { workspace = true }
+workspace-storage = { workspace = true }
+
+[lints]
+workspace = true
