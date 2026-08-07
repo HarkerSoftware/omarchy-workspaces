@@ -17,6 +17,7 @@ clap = { workspace = true }
 serde_json = { workspace = true }
 tokio = { workspace = true }
 workspace-core = { workspace = true }
+workspace-hypr = { workspace = true }
 workspace-proto = { workspace = true }
 workspace-storage = { workspace = true }
 

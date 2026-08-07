@@ -3,6 +3,8 @@
 //! The command tree grows milestone by milestone; `doctor` (M1) is the first
 //! real surface.
 
+mod doctor;
+
 use clap::{Parser, Subcommand};
 
 #[derive(Parser)]
@@ -22,12 +24,11 @@ enum Command {
     Doctor,
 }
 
-fn main() -> anyhow::Result<()> {
+#[tokio::main(flavor = "current_thread")]
+async fn main() -> std::process::ExitCode {
     let cli = Cli::parse();
-    match cli.command {
-        Command::Doctor => {
-            println!("workspace doctor: not yet implemented (lands in M1)");
-        }
-    }
-    Ok(())
+    let code = match cli.command {
+        Command::Doctor => doctor::run().await,
+    };
+    std::process::ExitCode::from(code)
 }

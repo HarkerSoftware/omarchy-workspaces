@@ -1091,6 +1091,7 @@ dependencies = [
  "serde_json",
  "tokio",
  "workspace-core",
+ "workspace-hypr",
  "workspace-proto",
  "workspace-storage",
 ]

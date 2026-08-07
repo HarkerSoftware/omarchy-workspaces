@@ -6,3 +6,5 @@
 //! - `~/.local/state/omarchy-workspaces/{projects/<slug>.toml, runtime.json, logs/}`
 
 #![warn(missing_docs)]
+
+pub mod paths;
