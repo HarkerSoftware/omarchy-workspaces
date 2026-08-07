@@ -10,6 +10,7 @@
 pub mod config;
 pub mod events;
 pub mod model;
+pub mod rules;
 pub mod search;
 pub mod world;
 pub mod ws_names;

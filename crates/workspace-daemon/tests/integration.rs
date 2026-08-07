@@ -137,6 +137,19 @@ async fn boot() -> (
     tokio::task::JoinHandle<anyhow::Result<()>>,
     std::path::PathBuf,
 ) {
+    boot_with_rules(None).await
+}
+
+/// Like `boot`, optionally writing a rules.toml into the daemon's config dir.
+async fn boot_with_rules(
+    rules_toml: Option<&str>,
+) -> (
+    tempfile::TempDir,
+    FakeHypr,
+    CancellationToken,
+    tokio::task::JoinHandle<anyhow::Result<()>>,
+    std::path::PathBuf,
+) {
     let dir = tempfile::tempdir().unwrap();
     let hypr_dir = dir.path().join("hypr");
     std::fs::create_dir_all(&hypr_dir).unwrap();
@@ -146,11 +159,18 @@ async fn boot() -> (
     fake.set_response("j/monitors", MONITORS_JSON).await;
     fake.set_response("j/activewindow", "{}").await;
 
+    let config_dir = dir.path().join("config");
+    std::fs::create_dir_all(&config_dir).unwrap();
+    if let Some(rules) = rules_toml {
+        std::fs::write(config_dir.join("rules.toml"), rules).unwrap();
+    }
+
     let runtime_dir = dir.path().join("run");
     let options = AppOptions {
         hypr_paths: fake.paths.clone(),
         runtime_dir: runtime_dir.clone(),
         config: Config::default(),
+        config_dir: Some(config_dir),
     };
     let shutdown = CancellationToken::new();
     let daemon = tokio::spawn(app::run(options, shutdown.clone()));
@@ -325,6 +345,7 @@ async fn second_instance_is_rejected() {
         hypr_paths: fake.paths.clone(),
         runtime_dir: _dir.path().join("run"),
         config: Config::default(),
+        config_dir: None,
     };
     let err = app::run(options, CancellationToken::new())
         .await
@@ -479,4 +500,89 @@ async fn wait_for(
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("timed out waiting for: {what}");
+}
+
+#[tokio::test]
+async fn rules_assign_and_move_new_windows() {
+    let rules = r#"
+        [[rules]]
+        name = "terminals"
+        project = "term"
+        [rules.match]
+        class = { equals = "kitty" }
+    "#;
+    let (_dir, fake, shutdown, daemon, socket) = boot_with_rules(Some(rules)).await;
+    let mut client = TestClient::connect(&socket).await;
+    wait_for_snapshot(&mut client, "hydration", |s| s.hypr_connected).await;
+
+    client
+        .request(Request::ProjectCreate {
+            name: "Terminals".into(),
+            slug: Some("term".into()),
+        })
+        .await;
+
+    // A kitty window opens; the enrichment fetch returns it.
+    let kitty = r#"[{
+        "address": "0xccc3",
+        "mapped": true, "hidden": false,
+        "at": [0, 0], "size": [800, 600],
+        "workspace": {"id": 1, "name": "1"},
+        "floating": false, "pinned": false, "fullscreen": 0,
+        "monitor": 0,
+        "class": "kitty", "title": "shell",
+        "initialClass": "kitty", "initialTitle": "kitty",
+        "pid": 777, "xwayland": false,
+        "grouped": [], "focusHistoryID": 0,
+        "stableId": "kkk"
+    }]"#;
+    fake.set_response("j/clients", kitty).await;
+    fake.emit("openwindow>>ccc3,1,kitty,shell").await;
+
+    // The rule assigns it and (rule_action = move, the default) moves it
+    // silently to the project workspace.
+    let snapshot = wait_for_snapshot(&mut client, "rule assignment", |s| {
+        s.windows
+            .iter()
+            .any(|w| w.address == "0xccc3" && w.assignment.is_some())
+    })
+    .await;
+    let window = snapshot
+        .windows
+        .iter()
+        .find(|w| w.address == "0xccc3")
+        .unwrap();
+    assert!(matches!(
+        window.assigned_by,
+        Some(workspace_core::world::AssignmentSource::Rule(ref name)) if name == "terminals"
+    ));
+    for _ in 0..200 {
+        if fake
+            .dispatches()
+            .await
+            .contains(&"movetoworkspacesilent name:term,address:0xccc3".to_string())
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(
+        fake.dispatches()
+            .await
+            .contains(&"movetoworkspacesilent name:term,address:0xccc3".to_string()),
+        "rule move dispatch missing: {:?}",
+        fake.dispatches().await
+    );
+
+    // rules.test dry-runs without side effects.
+    let test = client
+        .request(Request::RulesTest {
+            address: Some("0xccc3".into()),
+        })
+        .await;
+    assert_eq!(test["matches"][0]["rule"], "terminals");
+    assert_eq!(test["matches"][0]["project"], "term");
+
+    shutdown.cancel();
+    daemon.await.unwrap().unwrap();
 }

@@ -94,6 +94,17 @@ pub enum Request {
     /// List all projects.
     #[serde(rename = "project.list")]
     ProjectList,
+    /// Dry-run the rules engine against a window.
+    #[serde(rename = "rules.test")]
+    RulesTest {
+        /// Window address; defaults to the focused window.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        address: Option<String>,
+    },
+    /// Re-read config.toml and rules.toml from disk; invalid files leave the
+    /// running configuration untouched.
+    #[serde(rename = "config.reload")]
+    ConfigReload,
     /// Assign a window to a project (and optionally a group) manually.
     #[serde(rename = "window.assign")]
     WindowAssign {

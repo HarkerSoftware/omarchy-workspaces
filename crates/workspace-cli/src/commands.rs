@@ -154,6 +154,56 @@ pub async fn assign(
     }
 }
 
+/// `workspace rules test [address]` — dry-run the rules engine.
+pub async fn rules_test(socket: Option<PathBuf>, address: Option<String>, json: bool) -> u8 {
+    match one_request(socket, Request::RulesTest { address }).await {
+        Ok(result) => {
+            if json {
+                println!("{result}");
+                return 0;
+            }
+            println!(
+                "window {} (class {:?}, title {:?})",
+                result["address"].as_str().unwrap_or("?"),
+                result["class"].as_str().unwrap_or(""),
+                result["title"].as_str().unwrap_or("")
+            );
+            match result["matches"].as_array() {
+                Some(matches) if !matches.is_empty() => {
+                    for m in matches {
+                        println!(
+                            "  matches rule {:?} -> project {}{}",
+                            m["rule"].as_str().unwrap_or("?"),
+                            m["project"].as_str().unwrap_or("?"),
+                            m["group"]
+                                .as_str()
+                                .map(|g| format!(" (group {g})"))
+                                .unwrap_or_default()
+                        );
+                    }
+                }
+                _ => println!("  no rules match"),
+            }
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+/// `workspace daemon reload` — re-read config and rules.
+pub async fn daemon_reload(socket: Option<PathBuf>) -> u8 {
+    match one_request(socket, Request::ConfigReload).await {
+        Ok(result) => {
+            println!(
+                "reloaded ({} rules active)",
+                result["rules"].as_u64().unwrap_or(0)
+            );
+            0
+        }
+        Err(code) => code,
+    }
+}
+
 /// `workspace status` — daemon summary.
 pub async fn status(socket: Option<PathBuf>, json: bool) -> u8 {
     let mut client = match DaemonClient::connect(socket).await {

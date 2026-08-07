@@ -79,6 +79,7 @@ async fn main() -> anyhow::Result<()> {
         runtime_dir: workspace_storage::paths::runtime_dir()
             .context("XDG_RUNTIME_DIR is not set")?,
         config,
+        config_dir: workspace_storage::paths::config_dir(),
     };
 
     let shutdown = CancellationToken::new();

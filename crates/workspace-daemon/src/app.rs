@@ -24,6 +24,9 @@ pub struct AppOptions {
     pub runtime_dir: PathBuf,
     /// Parsed configuration.
     pub config: Config,
+    /// Config directory holding `config.toml`/`rules.toml`; enables rules
+    /// loading and `config.reload`. `None` disables both.
+    pub config_dir: Option<PathBuf>,
 }
 
 /// Run the daemon until `shutdown` is cancelled. Returns after cleanup.
@@ -50,6 +53,7 @@ pub async fn run(options: AppOptions, shutdown: CancellationToken) -> anyhow::Re
     let handles = actor::spawn(
         options.config.clone(),
         workspace_hypr::HyprCtl::new(options.hypr_paths.clone()),
+        options.config_dir.clone(),
     );
 
     let hypr = tokio::spawn(hypr_task::run(

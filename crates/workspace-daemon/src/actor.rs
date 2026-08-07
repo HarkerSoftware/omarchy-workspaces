@@ -14,9 +14,12 @@
 use std::sync::Arc;
 use std::time::Instant;
 
+use std::path::PathBuf;
+
 use tokio::sync::{broadcast, mpsc, oneshot, watch};
-use workspace_core::config::Config;
+use workspace_core::config::{Config, RuleAction};
 use workspace_core::model::{Project, Slug};
+use workspace_core::rules::{MatcherRegistry, RuleSet};
 use workspace_core::search::{self, Resolution};
 use workspace_core::world::{
     AssignmentSource, MonitorInfo, TrackedWindow, WindowFacts, WorkspaceInfo, World,
@@ -79,16 +82,55 @@ pub struct ActorHandles {
     pub snapshot: watch::Receiver<Arc<Snapshot>>,
 }
 
+/// Load and compile `rules.toml` from the config dir. Missing file = empty
+/// set; invalid file = error string naming every problem.
+pub fn load_rules(
+    config_dir: Option<&PathBuf>,
+    registry: &MatcherRegistry,
+) -> Result<RuleSet, String> {
+    let Some(path) = config_dir.map(|dir| dir.join("rules.toml")) else {
+        return Ok(RuleSet::default());
+    };
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Ok(RuleSet::default());
+        }
+        Err(error) => return Err(format!("cannot read {}: {error}", path.display())),
+    };
+    RuleSet::parse(&text, registry).map_err(|errors| {
+        errors
+            .iter()
+            .map(|e| e.to_string())
+            .collect::<Vec<_>>()
+            .join("; ")
+    })
+}
+
 /// Spawn the actor task and return its channels.
-pub fn spawn(config: Config, ctl: HyprCtl) -> ActorHandles {
+pub fn spawn(config: Config, ctl: HyprCtl, config_dir: Option<PathBuf>) -> ActorHandles {
     let (cmd_tx, cmd_rx) = mpsc::channel(256);
     let (bus_tx, _) = broadcast::channel(256);
     let (snapshot_tx, snapshot_rx) = watch::channel(Arc::new(Snapshot::default()));
+    let registry = MatcherRegistry::builtin();
+    let rules = match load_rules(config_dir.as_ref(), &registry) {
+        Ok(rules) => {
+            tracing::info!(rules = rules.len(), "rules loaded");
+            rules
+        }
+        Err(error) => {
+            tracing::error!(%error, "invalid rules.toml; starting with no rules");
+            RuleSet::default()
+        }
+    };
     let actor = StateActor {
         world: World::default(),
         projects: Vec::new(),
         config,
         ctl,
+        registry,
+        rules,
+        config_dir,
         started: Instant::now(),
         seq: 0,
         bus: bus_tx.clone(),
@@ -117,6 +159,9 @@ struct StateActor {
     projects: Vec<Project>,
     config: Config,
     ctl: HyprCtl,
+    registry: MatcherRegistry,
+    rules: RuleSet,
+    config_dir: Option<PathBuf>,
     started: Instant,
     seq: u64,
     bus: broadcast::Sender<Arc<EventEnvelope>>,
@@ -164,6 +209,7 @@ impl StateActor {
                 facts,
             } => {
                 self.world.upsert_window(&address, stable_id, facts);
+                self.apply_rules(&address);
             }
             Command::Request { request, resp } => match self.handle_request(request) {
                 Outcome::Reply(result) => {
@@ -327,10 +373,69 @@ impl StateActor {
         }
     }
 
+    /// Evaluate rules for a freshly enriched window and act per config.
+    /// Never overrides an existing assignment (Manual > Restore > Rule).
+    fn apply_rules(&mut self, address: &str) {
+        let Some(window) = self.world.windows.get(address) else {
+            return;
+        };
+        if window.assignment.is_some() {
+            return;
+        }
+        let facts = window.facts.clone();
+        let (rule_name, project_slug, group) = {
+            let matched = self.rules.matches(&facts);
+            let Some(rule) = matched.first() else { return };
+            (rule.name.clone(), rule.project.clone(), rule.group.clone())
+        };
+        let Some(project) = self.projects.iter().find(|p| p.slug == project_slug) else {
+            tracing::warn!(
+                rule = rule_name,
+                project = %project_slug,
+                "rule matched but its target project does not exist"
+            );
+            return;
+        };
+        let project_id = project.id;
+        let ws = self.ws_name(&project_slug);
+
+        let window = self.world.windows.get_mut(address).expect("checked above");
+        window.assignment = Some((project_id, group));
+        window.assigned_by = Some(AssignmentSource::Rule(rule_name.clone()));
+        tracing::info!(rule = rule_name, window = address, project = %project_slug, "rule assigned window");
+        self.emit(DomainEvent::RuleMatched {
+            rule: rule_name,
+            address: address.to_owned(),
+            project: project_slug.as_str().to_owned(),
+        });
+
+        let dispatch = match self.config.general.rule_action {
+            RuleAction::Assign => None,
+            RuleAction::Move => Some(Dispatch::MoveToWorkspaceSilent {
+                target: WsTarget::Name(ws),
+                address: workspace_hypr::WindowAddress::new(address),
+            }),
+            RuleAction::MoveFocus => Some(Dispatch::MoveToWorkspace {
+                target: WsTarget::Name(ws),
+                address: workspace_hypr::WindowAddress::new(address),
+            }),
+        };
+        if let Some(dispatch) = dispatch {
+            let ctl = self.ctl.clone();
+            tokio::spawn(async move {
+                if let Err(error) = ctl.dispatch(&dispatch).await {
+                    tracing::warn!(%error, "rule move dispatch failed");
+                }
+            });
+        }
+    }
+
     fn handle_request(&mut self, request: Request) -> Outcome {
         match request {
             Request::DaemonStatus => Outcome::Reply(Ok(json(&self.status()))),
             Request::StateSnapshot => Outcome::Reply(Ok(json(&self.snapshot()))),
+            Request::RulesTest { address } => self.rules_test(address),
+            Request::ConfigReload => self.config_reload(),
             Request::ProjectCreate { name, slug } => self.project_create(name, slug),
             Request::ProjectDelete { slug } => self.project_delete(&slug),
             Request::ProjectRename { slug, name } => self.project_rename(&slug, name),
@@ -358,6 +463,84 @@ impl StateActor {
                 data: None,
             })),
         }
+    }
+
+    // ---- rules & config -----------------------------------------------------
+
+    fn rules_test(&mut self, address: Option<String>) -> Outcome {
+        let address = match address.or_else(|| self.world.focused_window.clone()) {
+            Some(address) => address,
+            None => {
+                return Outcome::Reply(Err(bad_request(
+                    "no address given and no window is focused".to_owned(),
+                )));
+            }
+        };
+        let Some(window) = self.world.windows.get(&address) else {
+            return Outcome::Reply(Err(not_found(format!("no window at address {address}"))));
+        };
+        let matches: Vec<serde_json::Value> = self
+            .rules
+            .matches(&window.facts)
+            .iter()
+            .map(|rule| {
+                serde_json::json!({
+                    "rule": rule.name,
+                    "project": rule.project,
+                    "group": rule.group,
+                    "stop": rule.stop,
+                })
+            })
+            .collect();
+        Outcome::Reply(Ok(serde_json::json!({
+            "address": address,
+            "class": window.facts.class,
+            "title": window.facts.title,
+            "executable": window.facts.executable,
+            "matches": matches,
+        })))
+    }
+
+    fn config_reload(&mut self) -> Outcome {
+        let Some(dir) = self.config_dir.clone() else {
+            return Outcome::Reply(Err(bad_request(
+                "daemon was started without a config directory".to_owned(),
+            )));
+        };
+        let config_path = dir.join("config.toml");
+        let config = match std::fs::read_to_string(&config_path) {
+            Ok(text) => match Config::parse(&text) {
+                Ok(config) => config,
+                Err(error) => {
+                    return Outcome::Reply(Err(bad_request(format!(
+                        "{} invalid — keeping current config: {error}",
+                        config_path.display()
+                    ))));
+                }
+            },
+            Err(error) if error.kind() == std::io::ErrorKind::NotFound => Config::default(),
+            Err(error) => {
+                return Outcome::Reply(Err(bad_request(format!(
+                    "cannot read {}: {error}",
+                    config_path.display()
+                ))));
+            }
+        };
+        let rules = match load_rules(Some(&dir), &self.registry) {
+            Ok(rules) => rules,
+            Err(error) => {
+                return Outcome::Reply(Err(bad_request(format!(
+                    "rules.toml invalid — keeping current rules: {error}"
+                ))));
+            }
+        };
+        let rule_count = rules.len();
+        self.config = config;
+        self.rules = rules;
+        tracing::info!(rules = rule_count, "configuration reloaded");
+        Outcome::Reply(Ok(
+            serde_json::json!({ "reloaded": true, "rules": rule_count }),
+        ))
     }
 
     // ---- project operations -------------------------------------------------

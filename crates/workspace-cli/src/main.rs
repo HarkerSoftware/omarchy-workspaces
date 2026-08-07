@@ -69,6 +69,16 @@ enum Command {
         #[arg(long)]
         group: Option<String>,
     },
+    /// Rules-engine helpers.
+    Rules {
+        #[command(subcommand)]
+        cmd: RulesCmd,
+    },
+    /// Daemon management.
+    Daemon {
+        #[command(subcommand)]
+        cmd: DaemonCmd,
+    },
     /// Check the environment and configuration for problems.
     Doctor,
     /// Show daemon status.
@@ -81,6 +91,21 @@ enum Command {
         #[arg(short = 'n', long, default_value_t = 200)]
         lines: usize,
     },
+}
+
+#[derive(Subcommand)]
+enum RulesCmd {
+    /// Show which rules would match a window (no side effects).
+    Test {
+        /// Window address; defaults to the focused window.
+        address: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+enum DaemonCmd {
+    /// Re-read config.toml and rules.toml without restarting.
+    Reload,
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -97,6 +122,12 @@ async fn main() -> std::process::ExitCode {
             project,
             group,
         } => commands::assign(cli.socket, address, project, group).await,
+        Command::Rules {
+            cmd: RulesCmd::Test { address },
+        } => commands::rules_test(cli.socket, address, cli.json).await,
+        Command::Daemon {
+            cmd: DaemonCmd::Reload,
+        } => commands::daemon_reload(cli.socket).await,
         Command::Doctor => doctor::run().await,
         Command::Status => commands::status(cli.socket, cli.json).await,
         Command::Windows => commands::windows(cli.socket, cli.json).await,

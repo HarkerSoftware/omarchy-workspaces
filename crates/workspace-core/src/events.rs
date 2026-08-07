@@ -60,6 +60,16 @@ pub enum DomainEvent {
         /// Workspace name.
         name: String,
     },
+    /// A rule matched a newly opened window.
+    #[serde(rename = "rule.matched")]
+    RuleMatched {
+        /// The rule name.
+        rule: String,
+        /// Canonical window address.
+        address: String,
+        /// Target project slug.
+        project: String,
+    },
     /// A project was created.
     #[serde(rename = "project.created")]
     ProjectCreated {
@@ -107,7 +117,8 @@ impl DomainEvent {
             | Self::WindowClosed { .. }
             | Self::WindowMoved { .. }
             | Self::WindowTitleChanged { .. }
-            | Self::WindowFocused { .. } => "windows",
+            | Self::WindowFocused { .. }
+            | Self::RuleMatched { .. } => "windows",
             Self::WorkspaceChanged { .. } => "workspaces",
             Self::ProjectCreated { .. }
             | Self::ProjectDeleted { .. }
