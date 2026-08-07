@@ -853,3 +853,138 @@ class = "firefox"
     shutdown.cancel();
     daemon.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn group_lifecycle_hide_show_focus_move() {
+    let (_dir, fake, shutdown, daemon, socket) = boot().await;
+    let mut client = TestClient::connect(&socket).await;
+    wait_for_snapshot(&mut client, "hydration", |s| s.hypr_connected).await;
+
+    client
+        .request(Request::ProjectCreate {
+            name: "Web Dev".into(),
+            slug: Some("web".into()),
+        })
+        .await;
+    client
+        .request(Request::ProjectCreate {
+            name: "Other".into(),
+            slug: Some("other".into()),
+        })
+        .await;
+    let created = client
+        .request(Request::GroupCreate {
+            project: "web".into(),
+            name: "Backend".into(),
+            slug: None,
+        })
+        .await;
+    assert_eq!(created["group"], "backend");
+
+    // Put the firefox window in the group.
+    client
+        .request(Request::GroupAdd {
+            project: "web".into(),
+            group: "backend".into(),
+            address: "0xaaa1".into(),
+        })
+        .await;
+    assert!(
+        fake.dispatches()
+            .await
+            .contains(&"movetoworkspacesilent name:web,address:0xaaa1".to_string())
+    );
+
+    // Hide parks it on the group workspace; show brings it back.
+    let hidden = client
+        .request(Request::GroupHide {
+            project: "web".into(),
+            group: "backend".into(),
+        })
+        .await;
+    assert_eq!(hidden["windows"], 1);
+    assert!(
+        fake.dispatches()
+            .await
+            .contains(&"movetoworkspacesilent name:web:backend,address:0xaaa1".to_string())
+    );
+    client
+        .request(Request::GroupShow {
+            project: "web".into(),
+            group: "backend".into(),
+        })
+        .await;
+
+    // Hidden state persists in the snapshot's project summary groups.
+    let snapshot = wait_for_snapshot(&mut client, "group state", |s| {
+        s.projects
+            .iter()
+            .any(|p| p.slug.as_str() == "web" && p.groups.len() == 1)
+    })
+    .await;
+    assert_eq!(snapshot.projects[0].groups[0].as_str(), "backend");
+
+    // Focus focuses a member window.
+    client
+        .request(Request::GroupFocus {
+            project: "web".into(),
+            group: "backend".into(),
+        })
+        .await;
+    assert!(
+        fake.dispatches()
+            .await
+            .contains(&"focuswindow address:0xaaa1".to_string())
+    );
+
+    // Move the group to the other project: window follows, definition moves.
+    let moved = client
+        .request(Request::GroupMove {
+            project: "web".into(),
+            group: "backend".into(),
+            to: "other".into(),
+        })
+        .await;
+    assert_eq!(moved["to"], "other");
+    assert!(
+        fake.dispatches()
+            .await
+            .contains(&"movetoworkspacesilent name:other,address:0xaaa1".to_string())
+    );
+    let snapshot = wait_for_snapshot(&mut client, "group moved", |s| {
+        s.projects
+            .iter()
+            .any(|p| p.slug.as_str() == "other" && p.groups.len() == 1 && p.windows == 1)
+    })
+    .await;
+    assert!(
+        snapshot
+            .projects
+            .iter()
+            .find(|p| p.slug.as_str() == "web")
+            .unwrap()
+            .groups
+            .is_empty()
+    );
+
+    // Duplicate group in destination is refused.
+    client
+        .request(Request::GroupCreate {
+            project: "web".into(),
+            name: "Backend".into(),
+            slug: None,
+        })
+        .await;
+    let raw = client
+        .request_raw(Request::GroupMove {
+            project: "web".into(),
+            group: "backend".into(),
+            to: "other".into(),
+        })
+        .await;
+    assert!(!raw.ok);
+    assert_eq!(raw.error.unwrap().code, "CONFLICT");
+
+    shutdown.cancel();
+    daemon.await.unwrap().unwrap();
+}

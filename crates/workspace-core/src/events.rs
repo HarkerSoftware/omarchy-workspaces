@@ -98,6 +98,16 @@ pub enum DomainEvent {
         /// Slug of the now-active project, if any.
         slug: Option<String>,
     },
+    /// A group was created, hidden, shown, moved, or its membership changed.
+    #[serde(rename = "group.changed")]
+    GroupChanged {
+        /// Owning project slug.
+        project: String,
+        /// Group slug.
+        group: String,
+        /// What happened: `created` | `hidden` | `shown` | `moved` | `membership`.
+        change: String,
+    },
     /// One restore step changed state.
     #[serde(rename = "restore.progress")]
     RestoreProgress {
@@ -149,7 +159,8 @@ impl DomainEvent {
             Self::ProjectCreated { .. }
             | Self::ProjectDeleted { .. }
             | Self::ProjectRenamed { .. }
-            | Self::ProjectSwitched { .. } => "projects",
+            | Self::ProjectSwitched { .. }
+            | Self::GroupChanged { .. } => "projects",
             Self::RestoreProgress { .. } | Self::RestoreFinished { .. } => "restore",
             Self::HyprConnection { .. } | Self::ShuttingDown => "daemon",
         }

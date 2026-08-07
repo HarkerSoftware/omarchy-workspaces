@@ -82,6 +82,11 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Manage window groups inside a project.
+    Group {
+        #[command(subcommand)]
+        cmd: GroupCmd,
+    },
     /// Rules-engine helpers.
     Rules {
         #[command(subcommand)]
@@ -103,6 +108,69 @@ enum Command {
         /// Number of lines to print.
         #[arg(short = 'n', long, default_value_t = 200)]
         lines: usize,
+    },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum GroupCmd {
+    /// Create a group.
+    Create {
+        /// Project query.
+        project: String,
+        /// Group display name.
+        name: String,
+        /// Explicit slug (defaults to a slugified name).
+        #[arg(long)]
+        slug: Option<String>,
+    },
+    /// Add a window to a group.
+    Add {
+        /// Project query.
+        project: String,
+        /// Group slug.
+        group: String,
+        /// Window address (see `workspace windows`).
+        address: String,
+    },
+    /// Remove a window from its group (stays in the project).
+    Remove {
+        /// Project query.
+        project: String,
+        /// Group slug.
+        group: String,
+        /// Window address.
+        address: String,
+    },
+    /// Park the group's windows off-screen.
+    Hide {
+        /// Project query.
+        project: String,
+        /// Group slug.
+        group: String,
+    },
+    /// Bring the group's windows back.
+    Show {
+        /// Project query.
+        project: String,
+        /// Group slug.
+        group: String,
+    },
+    /// Show (if hidden) and focus the group.
+    Focus {
+        /// Project query.
+        project: String,
+        /// Group slug.
+        group: String,
+    },
+    /// Move the group to another project.
+    Move {
+        /// Source project query.
+        project: String,
+        /// Group slug.
+        group: String,
+        /// Destination project query.
+        #[arg(long)]
+        to: String,
     },
 }
 
@@ -139,6 +207,7 @@ async fn main() -> std::process::ExitCode {
         Command::Restore { project, dry_run } => {
             commands::restore(cli.socket, project, dry_run, cli.json).await
         }
+        Command::Group { cmd } => commands::group(cli.socket, cmd).await,
         Command::Rules {
             cmd: RulesCmd::Test { address },
         } => commands::rules_test(cli.socket, address, cli.json).await,

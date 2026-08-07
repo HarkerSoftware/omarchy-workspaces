@@ -319,6 +319,11 @@ impl StateActor {
                 }
             }
             Command::RestoreEvent(event) => {
+                // Restore step (e) of the plan: once a restore run completes,
+                // park the members of groups that are marked hidden.
+                if let DomainEvent::RestoreFinished { project, .. } = &event {
+                    self.park_hidden_groups(project.clone());
+                }
                 self.emit(event);
             }
             Command::Shutdown => {
@@ -546,6 +551,25 @@ impl StateActor {
                 project,
                 group,
             } => self.window_assign(&address, &project, group),
+            Request::GroupCreate {
+                project,
+                name,
+                slug,
+            } => self.group_create(&project, name, slug),
+            Request::GroupAdd {
+                project,
+                group,
+                address,
+            } => self.group_membership(&project, &group, &address, true),
+            Request::GroupRemove {
+                project,
+                group,
+                address,
+            } => self.group_membership(&project, &group, &address, false),
+            Request::GroupHide { project, group } => self.group_visibility(&project, &group, true),
+            Request::GroupShow { project, group } => self.group_visibility(&project, &group, false),
+            Request::GroupFocus { project, group } => self.group_focus(&project, &group),
+            Request::GroupMove { project, group, to } => self.group_move(&project, &group, &to),
             // `subscribe` is handled per-connection by the server.
             Request::Subscribe { .. } => Outcome::Reply(Err(ErrorBody {
                 code: error_code::BAD_REQUEST.to_owned(),
@@ -807,6 +831,390 @@ impl StateActor {
                     Ok(Ok(_)) => {}
                 }
             });
+        }
+    }
+
+    // ---- groups -------------------------------------------------------------
+
+    /// Park the members of every hidden group of `project_slug` (fire and
+    /// forget; used after restore runs).
+    fn park_hidden_groups(&self, project_slug: String) {
+        let Some(project) = self
+            .projects
+            .iter()
+            .find(|p| p.slug.as_str() == project_slug)
+        else {
+            return;
+        };
+        let mut dispatches = Vec::new();
+        for group in project.groups.iter().filter(|g| g.hidden) {
+            let parking = ws_names::group_workspace(
+                &self.config.general.workspace_prefix,
+                &project.slug,
+                &group.slug,
+            );
+            for address in self.group_members(project.id, &group.slug) {
+                dispatches.push(Dispatch::MoveToWorkspaceSilent {
+                    target: WsTarget::Name(parking.clone()),
+                    address: workspace_hypr::WindowAddress::new(&address),
+                });
+            }
+        }
+        if dispatches.is_empty() {
+            return;
+        }
+        let ctl = self.ctl.clone();
+        tokio::spawn(async move {
+            if let Err(error) = ctl.dispatch_batch(&dispatches).await {
+                tracing::warn!(%error, "parking hidden groups failed");
+            }
+        });
+    }
+
+    /// Resolve a (project query, group slug) pair to indices, with typed errors.
+    fn find_group(&self, project_query: &str, group: &str) -> Result<(usize, Slug), ErrorBody> {
+        let project = self.resolve(project_query)?;
+        let project_index = self
+            .projects
+            .iter()
+            .position(|p| p.id == project.id)
+            .expect("resolved");
+        let group_slug = Slug::parse(group).map_err(|e| bad_request(e.to_string()))?;
+        if !self.projects[project_index]
+            .groups
+            .iter()
+            .any(|g| g.slug == group_slug)
+        {
+            return Err(not_found(format!(
+                "project '{}' has no group '{group_slug}'",
+                self.projects[project_index].slug
+            )));
+        }
+        Ok((project_index, group_slug))
+    }
+
+    /// Windows currently assigned to (project, group).
+    fn group_members(
+        &self,
+        project_id: workspace_core::model::ProjectId,
+        group: &Slug,
+    ) -> Vec<String> {
+        self.world
+            .windows
+            .values()
+            .filter(|w| {
+                w.assignment
+                    .as_ref()
+                    .is_some_and(|(id, g)| *id == project_id && g.as_ref() == Some(group))
+            })
+            .map(|w| w.address.clone())
+            .collect()
+    }
+
+    fn group_create(&mut self, project_query: &str, name: String, slug: Option<String>) -> Outcome {
+        let project_id = match self.resolve(project_query) {
+            Ok(project) => project.id,
+            Err(error) => return Outcome::Reply(Err(error)),
+        };
+        let group_slug = match slug
+            .map(|s| Slug::parse(&s))
+            .unwrap_or_else(|| Slug::from_display_name(&name))
+        {
+            Ok(slug) => slug,
+            Err(error) => return Outcome::Reply(Err(bad_request(error.to_string()))),
+        };
+        let project = self
+            .projects
+            .iter_mut()
+            .find(|p| p.id == project_id)
+            .expect("resolved");
+        if project.groups.iter().any(|g| g.slug == group_slug) {
+            return Outcome::Reply(Err(conflict(format!(
+                "group '{group_slug}' already exists in '{}'",
+                project.slug
+            ))));
+        }
+        project.groups.push(workspace_core::model::Group {
+            slug: group_slug.clone(),
+            name,
+            hidden: false,
+        });
+        let saved = project.clone();
+        let project_slug = saved.slug.as_str().to_owned();
+        self.persist_project(&saved);
+        self.emit(DomainEvent::GroupChanged {
+            project: project_slug.clone(),
+            group: group_slug.as_str().to_owned(),
+            change: "created".into(),
+        });
+        Outcome::Reply(Ok(
+            serde_json::json!({ "project": project_slug, "group": group_slug }),
+        ))
+    }
+
+    /// Add a window to a group (`join = true`) or remove it (`join = false`).
+    fn group_membership(
+        &mut self,
+        project_query: &str,
+        group: &str,
+        address: &str,
+        join: bool,
+    ) -> Outcome {
+        let (project_index, group_slug) = match self.find_group(project_query, group) {
+            Ok(found) => found,
+            Err(error) => return Outcome::Reply(Err(error)),
+        };
+        if !self.world.windows.contains_key(address) {
+            return Outcome::Reply(Err(not_found(format!("no window at address {address}"))));
+        }
+        let project = &self.projects[project_index];
+        let (project_id, project_slug) = (project.id, project.slug.clone());
+        let hidden = project
+            .groups
+            .iter()
+            .find(|g| g.slug == group_slug)
+            .expect("checked")
+            .hidden;
+
+        let window = self.world.windows.get_mut(address).expect("checked above");
+        window.assignment = Some((project_id, join.then(|| group_slug.clone())));
+        window.assigned_by = Some(AssignmentSource::Manual);
+        self.persist_runtime();
+        self.emit(DomainEvent::GroupChanged {
+            project: project_slug.as_str().to_owned(),
+            group: group_slug.as_str().to_owned(),
+            change: "membership".into(),
+        });
+
+        // Joining a hidden group parks the window; anything else lands on the
+        // project's primary workspace.
+        let target = if join && hidden {
+            ws_names::group_workspace(
+                &self.config.general.workspace_prefix,
+                &project_slug,
+                &group_slug,
+            )
+        } else {
+            self.ws_name(&project_slug)
+        };
+        Outcome::DispatchThen {
+            dispatches: vec![Dispatch::MoveToWorkspaceSilent {
+                target: WsTarget::Name(target),
+                address: workspace_hypr::WindowAddress::new(address),
+            }],
+            result: serde_json::json!({
+                "project": project_slug,
+                "group": group_slug,
+                "address": address,
+                "member": join,
+            }),
+        }
+    }
+
+    /// Hide (park) or show a group's windows.
+    fn group_visibility(&mut self, project_query: &str, group: &str, hide: bool) -> Outcome {
+        let (project_index, group_slug) = match self.find_group(project_query, group) {
+            Ok(found) => found,
+            Err(error) => return Outcome::Reply(Err(error)),
+        };
+        let project = &mut self.projects[project_index];
+        let (project_id, project_slug) = (project.id, project.slug.clone());
+        project
+            .groups
+            .iter_mut()
+            .find(|g| g.slug == group_slug)
+            .expect("checked")
+            .hidden = hide;
+        let saved = project.clone();
+        self.persist_project(&saved);
+
+        let members = self.group_members(project_id, &group_slug);
+        let target = if hide {
+            ws_names::group_workspace(
+                &self.config.general.workspace_prefix,
+                &project_slug,
+                &group_slug,
+            )
+        } else {
+            self.ws_name(&project_slug)
+        };
+        let dispatches: Vec<Dispatch> = members
+            .iter()
+            .map(|address| Dispatch::MoveToWorkspaceSilent {
+                target: WsTarget::Name(target.clone()),
+                address: workspace_hypr::WindowAddress::new(address),
+            })
+            .collect();
+        self.emit(DomainEvent::GroupChanged {
+            project: project_slug.as_str().to_owned(),
+            group: group_slug.as_str().to_owned(),
+            change: if hide { "hidden" } else { "shown" }.into(),
+        });
+        Outcome::DispatchThen {
+            dispatches,
+            result: serde_json::json!({
+                "project": project_slug,
+                "group": group_slug,
+                "hidden": hide,
+                "windows": members.len(),
+            }),
+        }
+    }
+
+    /// Show a group if hidden, then focus one of its windows.
+    fn group_focus(&mut self, project_query: &str, group: &str) -> Outcome {
+        let (project_index, group_slug) = match self.find_group(project_query, group) {
+            Ok(found) => found,
+            Err(error) => return Outcome::Reply(Err(error)),
+        };
+        let project = &mut self.projects[project_index];
+        let (project_id, project_slug) = (project.id, project.slug.clone());
+        let was_hidden = {
+            let group = project
+                .groups
+                .iter_mut()
+                .find(|g| g.slug == group_slug)
+                .expect("checked");
+            std::mem::replace(&mut group.hidden, false)
+        };
+        if was_hidden {
+            let saved = project.clone();
+            self.persist_project(&saved);
+        }
+
+        let members = self.group_members(project_id, &group_slug);
+        let primary = self.ws_name(&project_slug);
+        let mut dispatches = Vec::new();
+        if was_hidden {
+            dispatches.extend(
+                members
+                    .iter()
+                    .map(|address| Dispatch::MoveToWorkspaceSilent {
+                        target: WsTarget::Name(primary.clone()),
+                        address: workspace_hypr::WindowAddress::new(address),
+                    }),
+            );
+        }
+        // Prefer the currently focused window if it is a member.
+        let focus_target = members
+            .iter()
+            .find(|a| self.world.focused_window.as_deref() == Some(a.as_str()))
+            .or_else(|| members.first());
+        match focus_target {
+            Some(address) => {
+                dispatches.push(Dispatch::FocusWindow(workspace_hypr::WindowAddress::new(
+                    address,
+                )));
+            }
+            None => {
+                // Empty group: just focus the project workspace.
+                dispatches.push(Dispatch::Workspace(WsTarget::Name(primary)));
+            }
+        }
+        if was_hidden {
+            self.emit(DomainEvent::GroupChanged {
+                project: project_slug.as_str().to_owned(),
+                group: group_slug.as_str().to_owned(),
+                change: "shown".into(),
+            });
+        }
+        Outcome::DispatchThen {
+            dispatches,
+            result: serde_json::json!({
+                "project": project_slug,
+                "group": group_slug,
+                "windows": members.len(),
+            }),
+        }
+    }
+
+    /// Move a group's definition and windows to another project.
+    fn group_move(&mut self, project_query: &str, group: &str, to_query: &str) -> Outcome {
+        let (source_index, group_slug) = match self.find_group(project_query, group) {
+            Ok(found) => found,
+            Err(error) => return Outcome::Reply(Err(error)),
+        };
+        let target_id = match self.resolve(to_query) {
+            Ok(project) => project.id,
+            Err(error) => return Outcome::Reply(Err(error)),
+        };
+        let source_id = self.projects[source_index].id;
+        if source_id == target_id {
+            return Outcome::Reply(Err(bad_request(
+                "source and destination projects are the same".to_owned(),
+            )));
+        }
+        let target_index = self
+            .projects
+            .iter()
+            .position(|p| p.id == target_id)
+            .expect("resolved");
+        if self.projects[target_index]
+            .groups
+            .iter()
+            .any(|g| g.slug == group_slug)
+        {
+            return Outcome::Reply(Err(conflict(format!(
+                "project '{}' already has a group '{group_slug}'",
+                self.projects[target_index].slug
+            ))));
+        }
+
+        let group_def = {
+            let source = &mut self.projects[source_index];
+            let position = source
+                .groups
+                .iter()
+                .position(|g| g.slug == group_slug)
+                .expect("checked");
+            source.groups.remove(position)
+        };
+        let hidden = group_def.hidden;
+        self.projects[target_index].groups.push(group_def);
+        let (source_project, target_project) = (
+            self.projects[source_index].clone(),
+            self.projects[target_index].clone(),
+        );
+        self.persist_project(&source_project);
+        self.persist_project(&target_project);
+
+        // Re-assign member windows and move them to the destination.
+        let members = self.group_members(source_id, &group_slug);
+        for address in &members {
+            if let Some(window) = self.world.windows.get_mut(address) {
+                window.assignment = Some((target_id, Some(group_slug.clone())));
+            }
+        }
+        self.persist_runtime();
+        let target_ws = if hidden {
+            ws_names::group_workspace(
+                &self.config.general.workspace_prefix,
+                &target_project.slug,
+                &group_slug,
+            )
+        } else {
+            self.ws_name(&target_project.slug)
+        };
+        let dispatches: Vec<Dispatch> = members
+            .iter()
+            .map(|address| Dispatch::MoveToWorkspaceSilent {
+                target: WsTarget::Name(target_ws.clone()),
+                address: workspace_hypr::WindowAddress::new(address),
+            })
+            .collect();
+        self.emit(DomainEvent::GroupChanged {
+            project: target_project.slug.as_str().to_owned(),
+            group: group_slug.as_str().to_owned(),
+            change: "moved".into(),
+        });
+        Outcome::DispatchThen {
+            dispatches,
+            result: serde_json::json!({
+                "group": group_slug,
+                "from": source_project.slug,
+                "to": target_project.slug,
+                "windows": members.len(),
+            }),
         }
     }
 

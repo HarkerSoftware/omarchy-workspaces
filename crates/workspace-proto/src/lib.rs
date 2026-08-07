@@ -123,6 +123,71 @@ pub enum Request {
     /// running configuration untouched.
     #[serde(rename = "config.reload")]
     ConfigReload,
+    /// Create a group inside a project.
+    #[serde(rename = "group.create")]
+    GroupCreate {
+        /// Project query.
+        project: String,
+        /// Group display name.
+        name: String,
+        /// Explicit slug; derived from the name when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slug: Option<String>,
+    },
+    /// Put a window into a group.
+    #[serde(rename = "group.add")]
+    GroupAdd {
+        /// Project query.
+        project: String,
+        /// Group slug.
+        group: String,
+        /// Canonical window address.
+        address: String,
+    },
+    /// Take a window out of its group (it stays in the project).
+    #[serde(rename = "group.remove")]
+    GroupRemove {
+        /// Project query.
+        project: String,
+        /// Group slug.
+        group: String,
+        /// Canonical window address.
+        address: String,
+    },
+    /// Park a group's windows on its parking workspace.
+    #[serde(rename = "group.hide")]
+    GroupHide {
+        /// Project query.
+        project: String,
+        /// Group slug.
+        group: String,
+    },
+    /// Bring a group's windows back to the project workspace.
+    #[serde(rename = "group.show")]
+    GroupShow {
+        /// Project query.
+        project: String,
+        /// Group slug.
+        group: String,
+    },
+    /// Show a group (if hidden) and focus one of its windows.
+    #[serde(rename = "group.focus")]
+    GroupFocus {
+        /// Project query.
+        project: String,
+        /// Group slug.
+        group: String,
+    },
+    /// Move a group (definition and windows) to another project.
+    #[serde(rename = "group.move")]
+    GroupMove {
+        /// Source project query.
+        project: String,
+        /// Group slug.
+        group: String,
+        /// Destination project query.
+        to: String,
+    },
     /// Assign a window to a project (and optionally a group) manually.
     #[serde(rename = "window.assign")]
     WindowAssign {

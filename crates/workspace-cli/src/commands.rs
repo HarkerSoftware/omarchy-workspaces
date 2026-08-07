@@ -285,6 +285,51 @@ fn print_plan(plan: &serde_json::Value) {
     }
 }
 
+/// `workspace group <cmd>` — group management.
+pub async fn group(socket: Option<PathBuf>, cmd: crate::GroupCmd) -> u8 {
+    use crate::GroupCmd;
+    let request = match cmd {
+        GroupCmd::Create {
+            project,
+            name,
+            slug,
+        } => Request::GroupCreate {
+            project,
+            name,
+            slug,
+        },
+        GroupCmd::Add {
+            project,
+            group,
+            address,
+        } => Request::GroupAdd {
+            project,
+            group,
+            address,
+        },
+        GroupCmd::Remove {
+            project,
+            group,
+            address,
+        } => Request::GroupRemove {
+            project,
+            group,
+            address,
+        },
+        GroupCmd::Hide { project, group } => Request::GroupHide { project, group },
+        GroupCmd::Show { project, group } => Request::GroupShow { project, group },
+        GroupCmd::Focus { project, group } => Request::GroupFocus { project, group },
+        GroupCmd::Move { project, group, to } => Request::GroupMove { project, group, to },
+    };
+    match one_request(socket, request).await {
+        Ok(result) => {
+            println!("{result}");
+            0
+        }
+        Err(code) => code,
+    }
+}
+
 /// `workspace rules test [address]` — dry-run the rules engine.
 pub async fn rules_test(socket: Option<PathBuf>, address: Option<String>, json: bool) -> u8 {
     match one_request(socket, Request::RulesTest { address }).await {
