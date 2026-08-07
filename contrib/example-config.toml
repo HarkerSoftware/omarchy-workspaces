@@ -1,0 +1,27 @@
+# Example ~/.config/omarchy-workspaces/config.toml — everything is optional.
+version = 1
+
+[general]
+# Prefix for our Hyprland workspace names ("" or e.g. "ws:").
+workspace_prefix = ""
+# What happens when a rule matches a new window: assign | move | move-focus.
+rule_action = "move"
+# Projects restored automatically a few seconds after the daemon starts.
+restore_on_boot = []
+
+[autosave]
+enabled = true
+debounce_ms = 2000
+interval_s = 60
+
+[switch]
+# Move a project's workspace to its preferred monitor before focusing it.
+move_workspace_to_preferred_monitor = true
+
+[launcher]
+# Readiness timeout for launched apps without an explicit timeout_ms.
+default_timeout_ms = 15000
+
+[log]
+# Overridden by RUST_LOG when set.
+level = "info"

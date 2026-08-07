@@ -1,0 +1,26 @@
+# Example ~/.config/omarchy-workspaces/rules.toml
+# Matchers within a rule are ANDed; higher priority evaluates first; the
+# first matching rule with stop = true (the default) wins. Operators:
+# equals / contains (case-insensitive unless case_sensitive = true), regex.
+# Test against a live window with: workspace rules test
+
+[[rules]]
+name = "browsers-to-research"
+priority = 10
+project = "research"
+[rules.match]
+class = { equals = "firefox" }
+
+[[rules]]
+name = "youtube-is-entertainment"
+priority = 50            # beats the generic firefox rule
+project = "entertainment"
+[rules.match]
+class = { equals = "firefox" }
+title = { contains = "YouTube" }
+
+[[rules]]
+name = "editors-to-dev"
+project = "development"
+[rules.match]
+executable = { regex = ".*/code$" }

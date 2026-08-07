@@ -1,0 +1,22 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    # Build inside Arch so gtk4/gtk4-layer-shell match the deployment distro.
+    container: archlinux:base-devel
+    steps:
+      - name: Install toolchain and system deps
+        run: pacman -Syu --noconfirm rust gtk4 gtk4-layer-shell pkgconf git
+      - uses: actions/checkout@v4
+      - name: Format
+        run: cargo fmt --all -- --check
+      - name: Clippy
+        run: cargo clippy --workspace --all-targets --all-features -- -D warnings
+      - name: Tests
+        run: cargo test --workspace --all-features

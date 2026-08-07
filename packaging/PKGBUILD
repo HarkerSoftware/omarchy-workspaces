@@ -1,0 +1,38 @@
+# Maintainer: Tyler Harker
+pkgname=omarchy-workspaces
+pkgver=0.1.0
+pkgrel=1
+pkgdesc="Workspace/project manager for Hyprland on Omarchy (daemon, CLI, panel)"
+arch=('x86_64')
+url="https://github.com/tylerharker/omarchy-workspaces"
+license=('MIT')
+depends=('gtk4' 'gtk4-layer-shell' 'hyprland')
+makedepends=('cargo')
+# NOTE: installs a binary literally named /usr/bin/workspace.
+source=("$pkgname-$pkgver.tar.gz::$url/archive/refs/tags/v$pkgver.tar.gz")
+sha256sums=('SKIP') # filled by the release workflow
+
+prepare() {
+  cd "$pkgname-$pkgver"
+  cargo fetch --locked --target "$(rustc -vV | sed -n 's/host: //p')"
+}
+
+build() {
+  cd "$pkgname-$pkgver"
+  cargo build --frozen --release
+}
+
+check() {
+  cd "$pkgname-$pkgver"
+  cargo test --frozen --release --workspace
+}
+
+package() {
+  cd "$pkgname-$pkgver"
+  install -Dm755 target/release/workspace target/release/workspace-daemon \
+    target/release/workspace-panel -t "$pkgdir/usr/bin/"
+  install -Dm644 contrib/omarchy-workspaces.service \
+    -t "$pkgdir/usr/lib/systemd/user/"
+  install -Dm644 LICENSE -t "$pkgdir/usr/share/licenses/$pkgname/"
+  install -Dm644 README.md -t "$pkgdir/usr/share/doc/$pkgname/"
+}

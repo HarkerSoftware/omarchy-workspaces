@@ -1,0 +1,38 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    steps:
+      - name: Install toolchain and system deps
+        run: pacman -Syu --noconfirm rust gtk4 gtk4-layer-shell pkgconf git
+      - uses: actions/checkout@v4
+      - name: Build
+        run: cargo build --release --workspace
+      - name: Package
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          staging="omarchy-workspaces-$version-x86_64"
+          mkdir -p "$staging/contrib"
+          cp target/release/workspace target/release/workspace-daemon \
+             target/release/workspace-panel "$staging/"
+          cp contrib/omarchy-workspaces.service contrib/example-config.toml \
+             contrib/example-rules.toml "$staging/contrib/"
+          cp LICENSE README.md "$staging/"
+          tar -czf "$staging.tar.gz" "$staging"
+          sha256sum "$staging.tar.gz" > SHA256SUMS
+      - name: Create release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            omarchy-workspaces-*.tar.gz
+            SHA256SUMS
+          generate_release_notes: true
