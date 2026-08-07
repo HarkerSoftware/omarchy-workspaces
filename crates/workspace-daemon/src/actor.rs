@@ -70,6 +70,20 @@ pub enum Command {
     },
     /// Persist the runtime snapshot now (autosave debounce fires this).
     Persist,
+    /// A restore run correlated a window to a slot; record the assignment
+    /// and apply the slot's placement.
+    CorrelateRestore {
+        /// Canonical window address.
+        address: String,
+        /// The satisfied slot.
+        slot_id: uuid::Uuid,
+        /// The owning project.
+        project_id: workspace_core::model::ProjectId,
+        /// Group the slot belongs to.
+        group: Option<Slug>,
+    },
+    /// Emit a restore progress/finished event on behalf of the executor.
+    RestoreEvent(DomainEvent),
     /// Graceful shutdown: emit `daemon.shutting_down` and stop.
     Shutdown,
 }
@@ -157,6 +171,8 @@ pub fn spawn(
         rules,
         config_dir,
         state_dir,
+        self_tx: cmd_tx.clone(),
+        hydrated_once: false,
         started: Instant::now(),
         seq: 0,
         bus: bus_tx.clone(),
@@ -191,6 +207,10 @@ struct StateActor {
     rules: RuleSet,
     config_dir: Option<PathBuf>,
     state_dir: Option<PathBuf>,
+    /// Clone of our own command sender, for restore executors and boot tasks.
+    self_tx: mpsc::Sender<Command>,
+    /// Whether the first hydration has happened (gates restore_on_boot).
+    hydrated_once: bool,
     started: Instant,
     seq: u64,
     bus: broadcast::Sender<Arc<EventEnvelope>>,
@@ -227,6 +247,10 @@ impl StateActor {
                 self.world
                     .hydrate(windows, workspaces, monitors, focused_window);
                 self.apply_recovery();
+                if !self.hydrated_once {
+                    self.hydrated_once = true;
+                    self.schedule_restore_on_boot();
+                }
             }
             Command::HyprConnection(up) => {
                 self.world.hypr_connected = up;
@@ -262,6 +286,40 @@ impl StateActor {
             },
             Command::Persist => {
                 self.persist_runtime();
+            }
+            Command::CorrelateRestore {
+                address,
+                slot_id,
+                project_id,
+                group,
+            } => {
+                let placement = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .and_then(|p| p.apps.iter().find(|s| s.slot_id == slot_id))
+                    .map(|s| s.placement.clone());
+                if let Some(window) = self.world.windows.get_mut(&address) {
+                    window.assignment = Some((project_id, group));
+                    window.assigned_by = Some(AssignmentSource::Restore(slot_id));
+                    self.persist_runtime();
+                    // Apply floating placement off the actor loop.
+                    if let Some(placement) = placement
+                        && placement.floating
+                    {
+                        let ctl = self.ctl.clone();
+                        let dispatches =
+                            crate::launcher::placement_dispatches(&address, &placement);
+                        tokio::spawn(async move {
+                            if let Err(error) = ctl.dispatch_batch(&dispatches).await {
+                                tracing::warn!(%error, "placement dispatches failed");
+                            }
+                        });
+                    }
+                }
+            }
+            Command::RestoreEvent(event) => {
+                self.emit(event);
             }
             Command::Shutdown => {
                 self.persist_runtime();
@@ -473,6 +531,7 @@ impl StateActor {
             Request::RulesTest { address } => self.rules_test(address),
             Request::ConfigReload => self.config_reload(),
             Request::ProjectSave { project } => self.project_save(project),
+            Request::ProjectRestore { project, dry_run } => self.project_restore(project, dry_run),
             Request::ProjectCreate { name, slug } => self.project_create(name, slug),
             Request::ProjectDelete { slug } => self.project_delete(&slug),
             Request::ProjectRename { slug, name } => self.project_rename(&slug, name),
@@ -633,6 +692,8 @@ impl StateActor {
             })
             .map(|w| workspace_core::model::AppSlot {
                 slot_id: uuid::Uuid::new_v4(),
+                name: None,
+                launch: None,
                 identity: workspace_core::model::WindowIdentity {
                     class: Some(w.facts.class.clone()),
                     initial_class: Some(w.facts.initial_class.clone()),
@@ -662,6 +723,91 @@ impl StateActor {
             "slots": saved.apps.len(),
             "project": json(&summary),
         })))
+    }
+
+    // ---- restore ------------------------------------------------------------
+
+    /// Plan (and unless `dry_run`, execute) a project restore.
+    fn project_restore(&mut self, query: Option<String>, dry_run: bool) -> Outcome {
+        let project = match query {
+            Some(query) => match self.resolve(&query) {
+                Ok(project) => project.clone(),
+                Err(error) => return Outcome::Reply(Err(error)),
+            },
+            None => {
+                let Some(id) = self.world.active_project else {
+                    return Outcome::Reply(Err(bad_request(
+                        "no project given and none is active".to_owned(),
+                    )));
+                };
+                match self.projects.iter().find(|p| p.id == id) {
+                    Some(project) => project.clone(),
+                    None => return Outcome::Reply(Err(not_found("project vanished".to_owned()))),
+                }
+            }
+        };
+        let candidates: Vec<&TrackedWindow> = self
+            .world
+            .windows
+            .values()
+            .filter(|w| match &w.assignment {
+                None => true,
+                Some((id, _)) => *id == project.id,
+            })
+            .collect();
+        let plan = match workspace_core::restore::plan(
+            &project,
+            &candidates,
+            &self.config.general.workspace_prefix,
+        ) {
+            Ok(plan) => plan,
+            Err(error) => return Outcome::Reply(Err(bad_request(error.to_string()))),
+        };
+        if dry_run {
+            return Outcome::Reply(Ok(json(&plan)));
+        }
+        let result = serde_json::json!({ "started": true, "plan": json(&plan) });
+        let ctx = crate::launcher::RestoreContext {
+            plan,
+            project_id: project.id,
+            ctl: self.ctl.clone(),
+            commands: self.self_tx.clone(),
+            bus: self.bus.clone(),
+            default_timeout: std::time::Duration::from_millis(
+                self.config.launcher.default_timeout_ms,
+            ),
+        };
+        self.world.active_project = Some(project.id);
+        self.persist_runtime();
+        tokio::spawn(crate::launcher::execute(ctx));
+        Outcome::Reply(Ok(result))
+    }
+
+    /// Kick off `restore_on_boot` projects a few seconds after first hydration.
+    fn schedule_restore_on_boot(&self) {
+        for slug in self.config.general.restore_on_boot.clone() {
+            let commands = self.self_tx.clone();
+            tokio::spawn(async move {
+                tokio::time::sleep(std::time::Duration::from_secs(3)).await;
+                let (tx, rx) = oneshot::channel();
+                let _ = commands
+                    .send(Command::Request {
+                        request: Request::ProjectRestore {
+                            project: Some(slug.as_str().to_owned()),
+                            dry_run: false,
+                        },
+                        resp: tx,
+                    })
+                    .await;
+                match rx.await {
+                    Ok(Err(error)) => {
+                        tracing::warn!(project = %slug, error = %error.message, "restore_on_boot failed")
+                    }
+                    Err(_) => tracing::warn!(project = %slug, "restore_on_boot dropped"),
+                    Ok(Ok(_)) => {}
+                }
+            });
+        }
     }
 
     // ---- rules & config -----------------------------------------------------

@@ -1,5 +1,7 @@
-//! Domain entities: projects, groups, app slots, and window identity.
+//! Domain entities: projects, groups, app slots, window identity, and launch
+//! specifications.
 
+use std::collections::BTreeMap;
 use std::fmt;
 use std::path::PathBuf;
 
@@ -152,19 +154,94 @@ pub struct Group {
     pub hidden: bool,
 }
 
-/// One desired window in a project: how to recognize it and how to place it.
+/// One desired window in a project: how to recognize it, how to place it,
+/// and (optionally) how to launch it.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSlot {
-    /// Stable slot identity, referenced by launch dependencies and restore progress.
+    /// Stable slot identity, referenced by restore progress.
     pub slot_id: Uuid,
+    /// Optional human name, unique within the project; launch dependencies
+    /// (`after = [...]`) refer to slots by this name.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
     /// How to match this slot to a live window.
     pub identity: WindowIdentity,
+    /// How to (re)create the window when it is missing.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub launch: Option<LaunchSpec>,
     /// Group this slot belongs to; `None` means the project's primary group.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub group: Option<Slug>,
     /// Desired placement (floating geometry, fullscreen, monitor).
     #[serde(default)]
     pub placement: Placement,
+}
+
+impl AppSlot {
+    /// Display label: the explicit name, else the identity's class, else the
+    /// launch command, else the slot id.
+    pub fn label(&self) -> String {
+        self.name
+            .clone()
+            .or_else(|| self.identity.class.clone())
+            .or_else(|| self.launch.as_ref().map(|l| l.command.clone()))
+            .unwrap_or_else(|| self.slot_id.to_string())
+    }
+}
+
+/// How to detect that a launched slot is ready.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+#[serde(tag = "type", rename_all = "kebab-case")]
+pub enum Readiness {
+    /// Ready when a window matching the slot's identity appears (default).
+    #[default]
+    Window,
+    /// Ready immediately after spawn (plus `startup_delay_ms`).
+    Delay,
+    /// Ready when a probe command exits 0, polled at `interval_ms`.
+    Command {
+        /// The probe command (run via the shell).
+        cmd: String,
+        /// Poll interval in milliseconds.
+        #[serde(default = "default_probe_interval")]
+        interval_ms: u64,
+    },
+}
+
+fn default_probe_interval() -> u64 {
+    500
+}
+
+/// How to launch a slot's application.
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
+pub struct LaunchSpec {
+    /// Executable or command line.
+    pub command: String,
+    /// Arguments appended to the command.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub args: Vec<String>,
+    /// Extra environment variables.
+    #[serde(default, skip_serializing_if = "BTreeMap::is_empty")]
+    pub env: BTreeMap<String, String>,
+    /// Working directory (`~` expanded at launch time).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub workdir: Option<String>,
+    /// Slot names that must be ready before this one launches.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub after: Vec<String>,
+    /// Extra wait after readiness before dependents may start.
+    #[serde(default)]
+    pub startup_delay_ms: u64,
+    /// Readiness timeout; the daemon's default applies when `None`.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub timeout_ms: Option<u64>,
+    /// Readiness detection.
+    #[serde(default)]
+    pub readiness: Readiness,
+    /// A windowless dependency (database, docker): spawned directly, never
+    /// matched to a window, started but not supervised.
+    #[serde(default)]
+    pub service: bool,
 }
 
 /// Criteria for matching a persisted slot to a live window across reboots.
@@ -270,10 +347,15 @@ mod tests {
         });
         p.apps.push(AppSlot {
             slot_id: Uuid::new_v4(),
+            name: Some("browser".into()),
             identity: WindowIdentity {
                 class: Some("firefox".into()),
                 ..Default::default()
             },
+            launch: Some(LaunchSpec {
+                command: "firefox".into(),
+                ..Default::default()
+            }),
             group: Some(Slug::parse("backend").unwrap()),
             placement: Placement {
                 floating: true,

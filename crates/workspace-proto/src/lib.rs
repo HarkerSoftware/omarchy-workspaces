@@ -102,6 +102,16 @@ pub enum Request {
         #[serde(default, skip_serializing_if = "Option::is_none")]
         project: Option<String>,
     },
+    /// Restore a project: adopt matching windows and launch what is missing.
+    #[serde(rename = "project.restore")]
+    ProjectRestore {
+        /// Project query; defaults to the active project.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+        /// Return the plan without executing it.
+        #[serde(default)]
+        dry_run: bool,
+    },
     /// Dry-run the rules engine against a window.
     #[serde(rename = "rules.test")]
     RulesTest {

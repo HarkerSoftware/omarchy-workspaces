@@ -174,6 +174,117 @@ pub async fn save(socket: Option<PathBuf>, project: Option<String>) -> u8 {
     }
 }
 
+/// `workspace restore [project] [--dry-run]` — rebuild a project's windows,
+/// streaming progress until the run finishes.
+pub async fn restore(
+    socket: Option<PathBuf>,
+    project: Option<String>,
+    dry_run: bool,
+    json: bool,
+) -> u8 {
+    let mut client = match DaemonClient::connect(socket).await {
+        Ok(client) => client,
+        Err(error) => return connect_error(error),
+    };
+    if !dry_run && let Err(error) = client.subscribe(&["restore"]).await {
+        eprintln!("error: {error:#}");
+        return 1;
+    }
+    let result = match client
+        .request(Request::ProjectRestore { project, dry_run })
+        .await
+    {
+        Ok(result) => result,
+        Err(error) => {
+            eprintln!("error: {error:#}");
+            return 1;
+        }
+    };
+    if dry_run {
+        if json {
+            println!("{result}");
+        } else {
+            print_plan(&result);
+        }
+        return 0;
+    }
+
+    let plan = &result["plan"];
+    let total = plan["waves"]
+        .as_array()
+        .map(|waves| waves.iter().filter_map(|w| w.as_array()).flatten().count())
+        .unwrap_or(0);
+    println!(
+        "restoring '{}': adopting {}, launching {}",
+        plan["project"].as_str().unwrap_or("?"),
+        plan["adopt"].as_array().map(Vec::len).unwrap_or(0),
+        total
+    );
+    loop {
+        let event = match client.next_event().await {
+            Ok(event) => event,
+            Err(error) => {
+                eprintln!("error: {error:#}");
+                return 1;
+            }
+        };
+        match event.data {
+            workspace_core::DomainEvent::RestoreProgress { slot, state, .. } => {
+                println!("  {slot}: {state}");
+            }
+            workspace_core::DomainEvent::RestoreFinished {
+                adopted,
+                launched,
+                failed,
+                ..
+            } => {
+                if failed.is_empty() {
+                    println!("done: {adopted} adopted, {launched} launched");
+                    return 0;
+                }
+                println!(
+                    "finished with failures: {adopted} adopted, {launched} launched, failed: {}",
+                    failed.join(", ")
+                );
+                return 1;
+            }
+            _ => {}
+        }
+    }
+}
+
+fn print_plan(plan: &serde_json::Value) {
+    println!("plan for '{}':", plan["project"].as_str().unwrap_or("?"));
+    for adopt in plan["adopt"].as_array().into_iter().flatten() {
+        println!(
+            "  adopt   {} ({}){}",
+            adopt["label"].as_str().unwrap_or("?"),
+            adopt["address"].as_str().unwrap_or("?"),
+            if adopt["needs_move"].as_bool() == Some(true) {
+                " -> move to project workspace"
+            } else {
+                ""
+            }
+        );
+    }
+    for (i, wave) in plan["waves"].as_array().into_iter().flatten().enumerate() {
+        for step in wave.as_array().into_iter().flatten() {
+            println!(
+                "  launch  [wave {}] {} ({})",
+                i + 1,
+                step["label"].as_str().unwrap_or("?"),
+                step["spec"]["command"].as_str().unwrap_or("?"),
+            );
+        }
+    }
+    for extra in plan["extra"].as_array().into_iter().flatten() {
+        println!(
+            "  keep    {} (no matching slot)",
+            extra.as_str().unwrap_or("?")
+        );
+    }
+}
+
 /// `workspace rules test [address]` — dry-run the rules engine.
 pub async fn rules_test(socket: Option<PathBuf>, address: Option<String>, json: bool) -> u8 {
     match one_request(socket, Request::RulesTest { address }).await {

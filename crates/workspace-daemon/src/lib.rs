@@ -7,5 +7,6 @@ pub mod actor;
 pub mod app;
 pub mod autosave;
 pub mod hypr_task;
+pub mod launcher;
 pub mod lock;
 pub mod server;

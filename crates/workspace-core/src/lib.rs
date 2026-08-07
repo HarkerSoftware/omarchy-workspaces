@@ -9,7 +9,9 @@
 
 pub mod config;
 pub mod events;
+pub mod launch;
 pub mod model;
+pub mod restore;
 pub mod rules;
 pub mod search;
 pub mod world;

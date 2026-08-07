@@ -682,3 +682,174 @@ async fn projects_and_assignments_survive_restart() {
     shutdown.cancel();
     daemon.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn restore_launches_missing_and_adopts_existing() {
+    // Pre-seed a project file with three slots: a service, a terminal that
+    // depends on it, and a browser satisfied by the live firefox window.
+    let dir = tempfile::tempdir().unwrap();
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(state_dir.join("projects")).unwrap();
+    std::fs::write(
+        state_dir.join("projects/dev.toml"),
+        r#"
+version = 1
+
+[project]
+id = "0b0e9db1-2f5c-4b3a-9a53-111111111111"
+slug = "dev"
+name = "Dev"
+
+[[project.apps]]
+slot_id = "0b0e9db1-2f5c-4b3a-9a53-222222222222"
+name = "db"
+[project.apps.identity]
+[project.apps.launch]
+command = "true"
+service = true
+readiness = { type = "delay" }
+
+[[project.apps]]
+slot_id = "0b0e9db1-2f5c-4b3a-9a53-333333333333"
+name = "term"
+[project.apps.identity]
+class = "kitty"
+[project.apps.launch]
+command = "kitty"
+after = ["db"]
+
+[[project.apps]]
+slot_id = "0b0e9db1-2f5c-4b3a-9a53-444444444444"
+name = "browser"
+[project.apps.identity]
+class = "firefox"
+"#,
+    )
+    .unwrap();
+
+    let hypr_dir = dir.path().join("hypr");
+    std::fs::create_dir_all(&hypr_dir).unwrap();
+    let fake = FakeHypr::spawn(&hypr_dir).await.unwrap();
+    fake.set_response("j/clients", CLIENTS_JSON).await;
+    fake.set_response("j/workspaces", WORKSPACES_JSON).await;
+    fake.set_response("j/monitors", MONITORS_JSON).await;
+    fake.set_response("j/activewindow", "{}").await;
+
+    let options = AppOptions {
+        hypr_paths: fake.paths.clone(),
+        runtime_dir: dir.path().join("run"),
+        config: Config::default(),
+        config_dir: None,
+        state_dir: Some(state_dir),
+    };
+    let socket = options.runtime_dir.join("daemon.sock");
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(app::run(options, shutdown.clone()));
+    for _ in 0..200 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut client = TestClient::connect(&socket).await;
+    wait_for_snapshot(&mut client, "hydration", |s| s.hypr_connected).await;
+
+    // Dry run first: browser adopted, db + term in dependency waves.
+    let plan = client
+        .request(Request::ProjectRestore {
+            project: Some("dev".into()),
+            dry_run: true,
+        })
+        .await;
+    assert_eq!(plan["adopt"][0]["label"], "browser");
+    assert_eq!(plan["adopt"][0]["needs_move"], true);
+    assert_eq!(plan["waves"][0][0]["label"], "db");
+    assert_eq!(plan["waves"][1][0]["label"], "term");
+    // Dry run has no side effects.
+    assert!(fake.dispatches().await.is_empty());
+
+    // Real run, with a subscriber watching progress.
+    let mut subscriber = TestClient::connect(&socket).await;
+    subscriber
+        .request(Request::Subscribe {
+            topics: Some(vec!["restore".into()]),
+        })
+        .await;
+    client
+        .request(Request::ProjectRestore {
+            project: Some("dev".into()),
+            dry_run: false,
+        })
+        .await;
+
+    // Wait for the kitty exec dispatch, then simulate the window appearing.
+    for _ in 0..300 {
+        if fake
+            .dispatches()
+            .await
+            .iter()
+            .any(|d| d.starts_with("exec [workspace name:dev silent] kitty"))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let dispatches = fake.dispatches().await;
+    assert!(
+        dispatches
+            .iter()
+            .any(|d| d == "exec [workspace name:dev silent] kitty"),
+        "{dispatches:?}"
+    );
+    // The firefox window was adopted onto the project workspace.
+    assert!(
+        dispatches
+            .iter()
+            .any(|d| d == "movetoworkspacesilent name:dev,address:0xaaa1"),
+        "{dispatches:?}"
+    );
+
+    fake.emit("openwindow>>ddd4,dev,kitty,shell").await;
+
+    // Progress until finished; term must become ready thanks to correlation.
+    let mut states = Vec::new();
+    loop {
+        let event = subscriber.next_event().await;
+        match event.data {
+            DomainEvent::RestoreProgress { slot, state, .. } => states.push((slot, state)),
+            DomainEvent::RestoreFinished {
+                adopted,
+                launched,
+                failed,
+                ..
+            } => {
+                assert_eq!(adopted, 1);
+                assert_eq!(launched, 2, "states seen: {states:?}");
+                assert!(failed.is_empty(), "failed: {failed:?}");
+                break;
+            }
+            _ => {}
+        }
+    }
+    assert!(states.contains(&("term".to_string(), "ready".to_string())));
+
+    // The new window is assigned with Restore provenance.
+    let snapshot = wait_for_snapshot(&mut client, "correlation", |s| {
+        s.windows
+            .iter()
+            .any(|w| w.address == "0xddd4" && w.assignment.is_some())
+    })
+    .await;
+    let window = snapshot
+        .windows
+        .iter()
+        .find(|w| w.address == "0xddd4")
+        .unwrap();
+    assert!(matches!(
+        window.assigned_by,
+        Some(workspace_core::world::AssignmentSource::Restore(_))
+    ));
+
+    shutdown.cancel();
+    daemon.await.unwrap().unwrap();
+}

@@ -6,7 +6,7 @@ use anyhow::{Context, bail};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader, Lines};
 use tokio::net::UnixStream;
 use tokio::net::unix::{OwnedReadHalf, OwnedWriteHalf};
-use workspace_proto::{PROTOCOL_VERSION, Request, RequestEnvelope, ServerMessage};
+use workspace_proto::{EventEnvelope, PROTOCOL_VERSION, Request, RequestEnvelope, ServerMessage};
 
 /// Process exit code used when the daemon is unreachable.
 pub const EXIT_DAEMON_DOWN: u8 = 3;
@@ -72,5 +72,24 @@ impl DaemonClient {
             }
         }
         bail!("daemon closed the connection before responding");
+    }
+
+    /// Subscribe this connection to pushed events for the given topics.
+    pub async fn subscribe(&mut self, topics: &[&str]) -> anyhow::Result<()> {
+        self.request(Request::Subscribe {
+            topics: Some(topics.iter().map(|t| t.to_string()).collect()),
+        })
+        .await?;
+        Ok(())
+    }
+
+    /// Wait for the next pushed event (requires a prior `subscribe`).
+    pub async fn next_event(&mut self) -> anyhow::Result<EventEnvelope> {
+        while let Some(line) = self.reader.next_line().await? {
+            if let Ok(ServerMessage::Event(event)) = serde_json::from_str::<ServerMessage>(&line) {
+                return Ok(event);
+            }
+        }
+        bail!("daemon closed the connection");
     }
 }

@@ -74,6 +74,14 @@ enum Command {
         /// Project query; defaults to the active project.
         project: Option<String>,
     },
+    /// Restore a project: adopt matching windows, launch what is missing.
+    Restore {
+        /// Project query; defaults to the active project.
+        project: Option<String>,
+        /// Show the plan without executing it.
+        #[arg(long)]
+        dry_run: bool,
+    },
     /// Rules-engine helpers.
     Rules {
         #[command(subcommand)]
@@ -128,6 +136,9 @@ async fn main() -> std::process::ExitCode {
             group,
         } => commands::assign(cli.socket, address, project, group).await,
         Command::Save { project } => commands::save(cli.socket, project).await,
+        Command::Restore { project, dry_run } => {
+            commands::restore(cli.socket, project, dry_run, cli.json).await
+        }
         Command::Rules {
             cmd: RulesCmd::Test { address },
         } => commands::rules_test(cli.socket, address, cli.json).await,

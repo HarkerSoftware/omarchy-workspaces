@@ -98,6 +98,32 @@ pub enum DomainEvent {
         /// Slug of the now-active project, if any.
         slug: Option<String>,
     },
+    /// One restore step changed state.
+    #[serde(rename = "restore.progress")]
+    RestoreProgress {
+        /// Project slug.
+        project: String,
+        /// Slot label.
+        slot: String,
+        /// `launching` | `ready` | `timeout` | `failed` | `skipped`.
+        state: String,
+        /// Slots completed so far.
+        completed: usize,
+        /// Total slots to launch.
+        total: usize,
+    },
+    /// A restore run finished.
+    #[serde(rename = "restore.finished")]
+    RestoreFinished {
+        /// Project slug.
+        project: String,
+        /// Existing windows adopted.
+        adopted: usize,
+        /// Slots launched to readiness.
+        launched: usize,
+        /// Labels of slots that failed, timed out, or were skipped.
+        failed: Vec<String>,
+    },
     /// The Hyprland event socket connected or dropped.
     #[serde(rename = "daemon.hypr_connection")]
     HyprConnection {
@@ -124,6 +150,7 @@ impl DomainEvent {
             | Self::ProjectDeleted { .. }
             | Self::ProjectRenamed { .. }
             | Self::ProjectSwitched { .. } => "projects",
+            Self::RestoreProgress { .. } | Self::RestoreFinished { .. } => "restore",
             Self::HyprConnection { .. } | Self::ShuttingDown => "daemon",
         }
     }
