@@ -171,6 +171,7 @@ async fn boot_with_rules(
         runtime_dir: runtime_dir.clone(),
         config: Config::default(),
         config_dir: Some(config_dir),
+        state_dir: Some(dir.path().join("state")),
     };
     let shutdown = CancellationToken::new();
     let daemon = tokio::spawn(app::run(options, shutdown.clone()));
@@ -346,6 +347,7 @@ async fn second_instance_is_rejected() {
         runtime_dir: _dir.path().join("run"),
         config: Config::default(),
         config_dir: None,
+        state_dir: None,
     };
     let err = app::run(options, CancellationToken::new())
         .await
@@ -582,6 +584,100 @@ async fn rules_assign_and_move_new_windows() {
         .await;
     assert_eq!(test["matches"][0]["rule"], "terminals");
     assert_eq!(test["matches"][0]["project"], "term");
+
+    shutdown.cancel();
+    daemon.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn projects_and_assignments_survive_restart() {
+    let dir = tempfile::tempdir().unwrap();
+    let hypr_dir = dir.path().join("hypr");
+    std::fs::create_dir_all(&hypr_dir).unwrap();
+    let fake = FakeHypr::spawn(&hypr_dir).await.unwrap();
+    fake.set_response("j/clients", CLIENTS_JSON).await;
+    fake.set_response("j/workspaces", WORKSPACES_JSON).await;
+    fake.set_response("j/monitors", MONITORS_JSON).await;
+    fake.set_response("j/activewindow", "{}").await;
+
+    let state_dir = dir.path().join("state");
+    let options = AppOptions {
+        hypr_paths: fake.paths.clone(),
+        runtime_dir: dir.path().join("run"),
+        config: Config::default(),
+        config_dir: None,
+        state_dir: Some(state_dir.clone()),
+    };
+    let socket = options.runtime_dir.join("daemon.sock");
+
+    // First daemon lifetime: create a project, assign the firefox window,
+    // capture it with project.save.
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(app::run(options.clone(), shutdown.clone()));
+    for _ in 0..200 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut client = TestClient::connect(&socket).await;
+    wait_for_snapshot(&mut client, "hydration", |s| s.hypr_connected).await;
+    client
+        .request(Request::ProjectCreate {
+            name: "Web Development".into(),
+            slug: None,
+        })
+        .await;
+    client
+        .request(Request::WindowAssign {
+            address: "0xaaa1".into(),
+            project: "web-development".into(),
+            group: None,
+        })
+        .await;
+    let saved = client
+        .request(Request::ProjectSave {
+            project: Some("web-development".into()),
+        })
+        .await;
+    assert_eq!(saved["slots"], 1);
+    shutdown.cancel();
+    daemon.await.unwrap().unwrap();
+
+    // The project file captured the window's identity.
+    let file = std::fs::read_to_string(state_dir.join("projects/web-development.toml")).unwrap();
+    assert!(file.contains("class = \"firefox\""), "{file}");
+
+    // Second daemon lifetime: the project loads from disk and the assignment
+    // is recovered via the window's stableId.
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(app::run(options.clone(), shutdown.clone()));
+    for _ in 0..200 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut client = TestClient::connect(&socket).await;
+    let snapshot = wait_for_snapshot(&mut client, "recovery", |s| {
+        s.hypr_connected
+            && s.projects
+                .iter()
+                .any(|p| p.slug.as_str() == "web-development")
+            && s.windows
+                .iter()
+                .any(|w| w.address == "0xaaa1" && w.assignment.is_some())
+    })
+    .await;
+    let window = snapshot
+        .windows
+        .iter()
+        .find(|w| w.address == "0xaaa1")
+        .unwrap();
+    assert!(matches!(
+        window.assigned_by,
+        Some(workspace_core::world::AssignmentSource::Manual)
+    ));
 
     shutdown.cancel();
     daemon.await.unwrap().unwrap();

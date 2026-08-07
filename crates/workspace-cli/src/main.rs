@@ -69,6 +69,11 @@ enum Command {
         #[arg(long)]
         group: Option<String>,
     },
+    /// Save a project's current windows into its file.
+    Save {
+        /// Project query; defaults to the active project.
+        project: Option<String>,
+    },
     /// Rules-engine helpers.
     Rules {
         #[command(subcommand)]
@@ -122,6 +127,7 @@ async fn main() -> std::process::ExitCode {
             project,
             group,
         } => commands::assign(cli.socket, address, project, group).await,
+        Command::Save { project } => commands::save(cli.socket, project).await,
         Command::Rules {
             cmd: RulesCmd::Test { address },
         } => commands::rules_test(cli.socket, address, cli.json).await,

@@ -29,6 +29,7 @@ use workspace_hypr::{Dispatch, HyprCtl, HyprEvent, WsTarget};
 use workspace_proto::{
     DaemonStatus, ErrorBody, EventEnvelope, ProjectSummary, Request, Snapshot, error_code,
 };
+use workspace_storage::runtime::{RuntimeAssignment, RuntimeState};
 
 /// Outcome of a request processed by the actor.
 pub type RequestResult = Result<serde_json::Value, ErrorBody>;
@@ -67,6 +68,8 @@ pub enum Command {
         /// Where to send the outcome.
         resp: oneshot::Sender<RequestResult>,
     },
+    /// Persist the runtime snapshot now (autosave debounce fires this).
+    Persist,
     /// Graceful shutdown: emit `daemon.shutting_down` and stop.
     Shutdown,
 }
@@ -108,7 +111,12 @@ pub fn load_rules(
 }
 
 /// Spawn the actor task and return its channels.
-pub fn spawn(config: Config, ctl: HyprCtl, config_dir: Option<PathBuf>) -> ActorHandles {
+pub fn spawn(
+    config: Config,
+    ctl: HyprCtl,
+    config_dir: Option<PathBuf>,
+    state_dir: Option<PathBuf>,
+) -> ActorHandles {
     let (cmd_tx, cmd_rx) = mpsc::channel(256);
     let (bus_tx, _) = broadcast::channel(256);
     let (snapshot_tx, snapshot_rx) = watch::channel(Arc::new(Snapshot::default()));
@@ -123,14 +131,32 @@ pub fn spawn(config: Config, ctl: HyprCtl, config_dir: Option<PathBuf>) -> Actor
             RuleSet::default()
         }
     };
+    let (projects, recovery) = match &state_dir {
+        Some(dir) => {
+            let (projects, errors) = workspace_storage::projects::load_projects(dir);
+            for error in &errors {
+                tracing::error!(%error, "skipping unreadable project file");
+            }
+            let runtime = workspace_storage::runtime::load_runtime(dir);
+            tracing::info!(
+                projects = projects.len(),
+                recovered_assignments = runtime.assignments.len(),
+                "state loaded"
+            );
+            (projects, runtime)
+        }
+        None => (Vec::new(), RuntimeState::default()),
+    };
     let actor = StateActor {
         world: World::default(),
-        projects: Vec::new(),
+        projects,
+        recovery,
         config,
         ctl,
         registry,
         rules,
         config_dir,
+        state_dir,
         started: Instant::now(),
         seq: 0,
         bus: bus_tx.clone(),
@@ -157,11 +183,14 @@ enum Outcome {
 struct StateActor {
     world: World,
     projects: Vec<Project>,
+    /// Assignments recovered from runtime.json, applied during hydration.
+    recovery: RuntimeState,
     config: Config,
     ctl: HyprCtl,
     registry: MatcherRegistry,
     rules: RuleSet,
     config_dir: Option<PathBuf>,
+    state_dir: Option<PathBuf>,
     started: Instant,
     seq: u64,
     bus: broadcast::Sender<Arc<EventEnvelope>>,
@@ -197,6 +226,7 @@ impl StateActor {
                 );
                 self.world
                     .hydrate(windows, workspaces, monitors, focused_window);
+                self.apply_recovery();
             }
             Command::HyprConnection(up) => {
                 self.world.hypr_connected = up;
@@ -230,7 +260,11 @@ impl StateActor {
                     });
                 }
             },
+            Command::Persist => {
+                self.persist_runtime();
+            }
             Command::Shutdown => {
+                self.persist_runtime();
                 self.emit(DomainEvent::ShuttingDown);
             }
         }
@@ -363,6 +397,7 @@ impl StateActor {
         };
         if self.world.active_project != new_active {
             self.world.active_project = new_active;
+            self.persist_runtime();
             let slug = new_active.and_then(|id| {
                 self.projects
                     .iter()
@@ -402,6 +437,7 @@ impl StateActor {
         let window = self.world.windows.get_mut(address).expect("checked above");
         window.assignment = Some((project_id, group));
         window.assigned_by = Some(AssignmentSource::Rule(rule_name.clone()));
+        self.persist_runtime();
         tracing::info!(rule = rule_name, window = address, project = %project_slug, "rule assigned window");
         self.emit(DomainEvent::RuleMatched {
             rule: rule_name,
@@ -436,6 +472,7 @@ impl StateActor {
             Request::StateSnapshot => Outcome::Reply(Ok(json(&self.snapshot()))),
             Request::RulesTest { address } => self.rules_test(address),
             Request::ConfigReload => self.config_reload(),
+            Request::ProjectSave { project } => self.project_save(project),
             Request::ProjectCreate { name, slug } => self.project_create(name, slug),
             Request::ProjectDelete { slug } => self.project_delete(&slug),
             Request::ProjectRename { slug, name } => self.project_rename(&slug, name),
@@ -463,6 +500,168 @@ impl StateActor {
                 data: None,
             })),
         }
+    }
+
+    // ---- persistence --------------------------------------------------------
+
+    /// Recovery key for a window: stableId when known, else the address.
+    fn recovery_key(window: &TrackedWindow) -> String {
+        window
+            .stable_id
+            .clone()
+            .unwrap_or_else(|| window.address.clone())
+    }
+
+    /// Re-apply assignments recovered from runtime.json to freshly hydrated
+    /// windows (daemon restart mid-session).
+    fn apply_recovery(&mut self) {
+        if self.recovery.assignments.is_empty() && self.recovery.active_project.is_none() {
+            return;
+        }
+        let mut recovered = 0usize;
+        let addresses: Vec<String> = self.world.windows.keys().cloned().collect();
+        for address in addresses {
+            let window = &self.world.windows[&address];
+            if window.assignment.is_some() {
+                continue;
+            }
+            let key = Self::recovery_key(window);
+            let Some(saved) = self.recovery.assignments.get(&key) else {
+                continue;
+            };
+            let Some(project) = self.projects.iter().find(|p| p.slug == saved.project) else {
+                continue;
+            };
+            let assigned_by = match saved.source.as_str() {
+                "manual" => AssignmentSource::Manual,
+                rule => AssignmentSource::Rule(rule.to_owned()),
+            };
+            let (project_id, group) = (project.id, saved.group.clone());
+            let window = self.world.windows.get_mut(&address).expect("iterated");
+            window.assignment = Some((project_id, group));
+            window.assigned_by = Some(assigned_by);
+            recovered += 1;
+        }
+        if let Some(slug) = self.recovery.active_project.clone()
+            && self.world.active_project.is_none()
+            && let Some(project) = self.projects.iter().find(|p| p.slug == slug)
+        {
+            self.world.active_project = Some(project.id);
+        }
+        if recovered > 0 {
+            tracing::info!(recovered, "assignments recovered from runtime.json");
+        }
+    }
+
+    /// Snapshot assignments + active project to runtime.json.
+    fn persist_runtime(&self) {
+        let Some(dir) = &self.state_dir else { return };
+        let mut state = RuntimeState {
+            active_project: self.world.active_project.and_then(|id| {
+                self.projects
+                    .iter()
+                    .find(|p| p.id == id)
+                    .map(|p| p.slug.clone())
+            }),
+            assignments: Default::default(),
+        };
+        for window in self.world.windows.values() {
+            let Some((project_id, group)) = &window.assignment else {
+                continue;
+            };
+            let Some(project) = self.projects.iter().find(|p| p.id == *project_id) else {
+                continue;
+            };
+            let source = match &window.assigned_by {
+                Some(AssignmentSource::Rule(rule)) => rule.clone(),
+                Some(AssignmentSource::Restore(_)) => "restore".to_owned(),
+                _ => "manual".to_owned(),
+            };
+            state.assignments.insert(
+                Self::recovery_key(window),
+                RuntimeAssignment {
+                    project: project.slug.clone(),
+                    group: group.clone(),
+                    source,
+                },
+            );
+        }
+        if let Err(error) = workspace_storage::runtime::save_runtime(dir, &state) {
+            tracing::warn!(%error, "cannot persist runtime.json");
+        }
+    }
+
+    /// Write one project's file to disk.
+    fn persist_project(&self, project: &Project) {
+        let Some(dir) = &self.state_dir else { return };
+        if let Err(error) = workspace_storage::projects::save_project(dir, project) {
+            tracing::error!(%error, slug = %project.slug, "cannot persist project file");
+        }
+    }
+
+    /// `project.save`: capture the project's currently assigned windows as
+    /// declarative app slots and persist the file.
+    fn project_save(&mut self, query: Option<String>) -> Outcome {
+        let project_id = match query {
+            Some(query) => match self.resolve(&query) {
+                Ok(project) => project.id,
+                Err(error) => return Outcome::Reply(Err(error)),
+            },
+            None => match self.world.active_project {
+                Some(id) => id,
+                None => {
+                    return Outcome::Reply(Err(bad_request(
+                        "no project given and none is active".to_owned(),
+                    )));
+                }
+            },
+        };
+        let monitor_names: std::collections::HashMap<i64, String> = self
+            .world
+            .monitors
+            .iter()
+            .map(|m| (m.id, m.name.clone()))
+            .collect();
+        let apps: Vec<workspace_core::model::AppSlot> = self
+            .world
+            .windows
+            .values()
+            .filter(|w| {
+                w.assignment
+                    .as_ref()
+                    .is_some_and(|(id, _)| *id == project_id)
+            })
+            .map(|w| workspace_core::model::AppSlot {
+                slot_id: uuid::Uuid::new_v4(),
+                identity: workspace_core::model::WindowIdentity {
+                    class: Some(w.facts.class.clone()),
+                    initial_class: Some(w.facts.initial_class.clone()),
+                    executable: w.facts.executable.clone(),
+                    title_pattern: None,
+                },
+                group: w.assignment.as_ref().and_then(|(_, g)| g.clone()),
+                placement: workspace_core::model::Placement {
+                    floating: w.facts.floating,
+                    position: w.facts.floating.then_some(w.facts.at),
+                    size: w.facts.floating.then_some(w.facts.size),
+                    fullscreen: w.facts.fullscreen,
+                    monitor: monitor_names.get(&w.facts.monitor).cloned(),
+                },
+            })
+            .collect();
+        let Some(project) = self.projects.iter_mut().find(|p| p.id == project_id) else {
+            return Outcome::Reply(Err(not_found("project vanished".to_owned())));
+        };
+        project.apps = apps;
+        let saved = project.clone();
+        self.persist_project(&saved);
+        self.persist_runtime();
+        let summary = self.summary(&saved);
+        Outcome::Reply(Ok(serde_json::json!({
+            "saved": saved.slug,
+            "slots": saved.apps.len(),
+            "project": json(&summary),
+        })))
     }
 
     // ---- rules & config -----------------------------------------------------
@@ -576,6 +775,7 @@ impl StateActor {
             monitor: None,
         };
         let summary = self.summary(&project);
+        self.persist_project(&project);
         self.projects.push(project);
         self.emit(DomainEvent::ProjectCreated {
             slug: slug.as_str().to_owned(),
@@ -605,6 +805,12 @@ impl StateActor {
             self.world.active_project = None;
             self.emit(DomainEvent::ProjectSwitched { slug: None });
         }
+        if let Some(dir) = &self.state_dir
+            && let Err(error) = workspace_storage::projects::delete_project(dir, &project.slug)
+        {
+            tracing::error!(%error, "cannot delete project file");
+        }
+        self.persist_runtime();
         self.emit(DomainEvent::ProjectDeleted {
             slug: project.slug.as_str().to_owned(),
         });
@@ -616,15 +822,10 @@ impl StateActor {
             return Outcome::Reply(Err(not_found(format!("no project with slug '{slug}'"))));
         };
         project.name = name.clone();
-        let slug = project.slug.as_str().to_owned();
-        let summary = {
-            let project = self
-                .projects
-                .iter()
-                .find(|p| p.slug.as_str() == slug)
-                .expect("just renamed");
-            self.summary(project)
-        };
+        let renamed = project.clone();
+        let slug = renamed.slug.as_str().to_owned();
+        self.persist_project(&renamed);
+        let summary = self.summary(&renamed);
         self.emit(DomainEvent::ProjectRenamed { slug, name });
         Outcome::Reply(Ok(json(&summary)))
     }
@@ -649,6 +850,7 @@ impl StateActor {
         dispatches.push(Dispatch::Workspace(WsTarget::Name(ws)));
 
         self.world.active_project = Some(project_id);
+        self.persist_runtime();
         self.emit(DomainEvent::ProjectSwitched {
             slug: Some(slug.as_str().to_owned()),
         });
@@ -685,6 +887,7 @@ impl StateActor {
         let window = self.world.windows.get_mut(address).expect("checked above");
         window.assignment = Some((project_id, group_slug));
         window.assigned_by = Some(AssignmentSource::Manual);
+        self.persist_runtime();
         let target_address = workspace_hypr::WindowAddress::new(address);
         Outcome::DispatchThen {
             dispatches: vec![Dispatch::MoveToWorkspaceSilent {

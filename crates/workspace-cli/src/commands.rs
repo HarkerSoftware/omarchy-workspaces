@@ -154,6 +154,26 @@ pub async fn assign(
     }
 }
 
+/// `workspace save [project]` — snapshot assigned windows into the project file.
+pub async fn save(socket: Option<PathBuf>, project: Option<String>) -> u8 {
+    match one_request(socket, Request::ProjectSave { project }).await {
+        Ok(result) => {
+            println!(
+                "saved '{}' ({} app slot{})",
+                result["saved"].as_str().unwrap_or("?"),
+                result["slots"].as_u64().unwrap_or(0),
+                if result["slots"].as_u64() == Some(1) {
+                    ""
+                } else {
+                    "s"
+                }
+            );
+            0
+        }
+        Err(code) => code,
+    }
+}
+
 /// `workspace rules test [address]` — dry-run the rules engine.
 pub async fn rules_test(socket: Option<PathBuf>, address: Option<String>, json: bool) -> u8 {
     match one_request(socket, Request::RulesTest { address }).await {

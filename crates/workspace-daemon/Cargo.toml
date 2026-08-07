@@ -23,6 +23,7 @@ tokio-util = { workspace = true }
 tracing = { workspace = true }
 tracing-appender = { workspace = true }
 tracing-subscriber = { workspace = true }
+uuid = { workspace = true }
 workspace-core = { workspace = true }
 workspace-hypr = { workspace = true }
 workspace-proto = { workspace = true }

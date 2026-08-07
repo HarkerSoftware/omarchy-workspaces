@@ -94,6 +94,14 @@ pub enum Request {
     /// List all projects.
     #[serde(rename = "project.list")]
     ProjectList,
+    /// Capture a project's current windows as declarative app slots and
+    /// persist its file.
+    #[serde(rename = "project.save")]
+    ProjectSave {
+        /// Project query; defaults to the active project.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
     /// Dry-run the rules engine against a window.
     #[serde(rename = "rules.test")]
     RulesTest {

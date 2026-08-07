@@ -1,0 +1,26 @@
+# systemd user unit for the omarchy-workspaces daemon.
+#
+# Install:
+#   mkdir -p ~/.config/systemd/user
+#   cp omarchy-workspaces.service ~/.config/systemd/user/
+#   systemctl --user daemon-reload
+#   systemctl --user enable --now omarchy-workspaces
+#
+# Alternative (uwsm/exec-once): add to ~/.config/hypr/autostart.conf:
+#   exec-once = uwsm-app -- workspace-daemon
+
+[Unit]
+Description=omarchy-workspaces daemon (workspace/project manager for Hyprland)
+Documentation=https://github.com/tylerharker/omarchy-workspaces
+PartOf=graphical-session.target
+After=graphical-session.target
+
+[Service]
+Type=simple
+ExecStart=%h/.local/bin/workspace-daemon
+Restart=on-failure
+RestartSec=2
+Slice=app.slice
+
+[Install]
+WantedBy=graphical-session.target

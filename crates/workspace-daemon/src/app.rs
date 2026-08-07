@@ -27,6 +27,8 @@ pub struct AppOptions {
     /// Config directory holding `config.toml`/`rules.toml`; enables rules
     /// loading and `config.reload`. `None` disables both.
     pub config_dir: Option<PathBuf>,
+    /// State directory for projects/runtime persistence. `None` disables it.
+    pub state_dir: Option<PathBuf>,
 }
 
 /// Run the daemon until `shutdown` is cancelled. Returns after cleanup.
@@ -54,7 +56,14 @@ pub async fn run(options: AppOptions, shutdown: CancellationToken) -> anyhow::Re
         options.config.clone(),
         workspace_hypr::HyprCtl::new(options.hypr_paths.clone()),
         options.config_dir.clone(),
+        options.state_dir.clone(),
     );
+
+    tokio::spawn(crate::autosave::run(
+        options.config.autosave.clone(),
+        handles.bus.subscribe(),
+        handles.commands.clone(),
+    ));
 
     let hypr = tokio::spawn(hypr_task::run(
         options.hypr_paths.clone(),

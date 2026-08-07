@@ -1125,6 +1125,7 @@ dependencies = [
  "tracing",
  "tracing-appender",
  "tracing-subscriber",
+ "uuid",
  "workspace-core",
  "workspace-hypr",
  "workspace-proto",
