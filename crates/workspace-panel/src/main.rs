@@ -101,6 +101,10 @@ fn build_ui(app: &gtk::Application) {
     window.set_anchor(Edge::Left, true);
     window.set_anchor(Edge::Top, true);
     window.set_anchor(Edge::Bottom, true);
+    // RAIL_WIDTH is only the initial guess: the true collapsed width is
+    // whatever the CSS adds up to (avatar, state rings, paddings), and the
+    // exclusive zone must match it or tiles slide under the rail —
+    // sync_exclusive_zone() re-measures after every row rebuild.
     window.set_exclusive_zone(RAIL_WIDTH);
     window.set_keyboard_mode(KeyboardMode::OnDemand);
     window.set_default_width(RAIL_WIDTH);
@@ -286,6 +290,8 @@ fn build_ui(app: &gtk::Application) {
         visual_order,
         #[strong]
         drag,
+        #[strong]
+        window,
         async move {
             while let Ok(update) = updates.recv().await {
                 match update {
@@ -299,6 +305,7 @@ fn build_ui(app: &gtk::Application) {
                         *row_order.borrow_mut() = order.clone();
                         *visual_order.borrow_mut() = order;
                         rebuild_rows(&list, &ui, &projects, &requests, &settings_window, &drag);
+                        sync_exclusive_zone(&window, &ui);
                     }
                     UiUpdate::ProjectDetails(project) => {
                         if let Some(open) = settings_window.borrow().as_ref() {
@@ -610,6 +617,25 @@ fn open_row_menu(
         glib::idle_add_local_once(move || popover.unparent());
     });
     popover.popup();
+}
+
+/// Match the exclusive zone to the rail's actual collapsed width. The CSS
+/// decides the real width (avatar size, state rings, paddings); a stale
+/// hardcoded zone lets tiled windows slide under the rail. Runs at idle so
+/// the freshly rebuilt rows have been allocated; skipped while hover-expanded
+/// (the zone must never follow the overlay expansion).
+fn sync_exclusive_zone(window: &gtk::ApplicationWindow, ui: &Rc<Ui>) {
+    let window = window.clone();
+    let ui = Rc::clone(ui);
+    glib::idle_add_local_once(move || {
+        if ui.expanded.get() {
+            return;
+        }
+        let width = window.width();
+        if width > 0 && window.exclusive_zone() != width {
+            window.set_exclusive_zone(width);
+        }
+    });
 }
 
 /// Up to two initial letters of the display name ("Web Development" → "WD").
