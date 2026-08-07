@@ -1,0 +1,55 @@
+/* Base panel styling. Milestone M-P2 replaces the hardcoded palette with
+ * colors generated from the current Omarchy theme. */
+
+window#workspace-panel {
+  background-color: rgba(26, 27, 38, 0.92); /* tokyo-night bg, blur-friendly */
+}
+
+.rail {
+  padding: 8px 0;
+}
+
+.projects {
+  background: transparent;
+}
+
+.project-row {
+  padding: 6px 0;
+  margin: 2px 6px;
+  border-radius: 8px;
+  transition: background-color 120ms ease;
+}
+
+.project-row:hover {
+  background-color: rgba(255, 255, 255, 0.08);
+}
+
+.project-row.active {
+  background-color: rgba(122, 162, 247, 0.25); /* accent tint */
+}
+
+.avatar {
+  min-width: 32px;
+  min-height: 32px;
+  border-radius: 16px;
+  background-color: rgba(122, 162, 247, 0.35);
+  color: #c0caf5;
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.project-row.active .avatar {
+  background-color: #7aa2f7;
+  color: #1a1b26;
+}
+
+.status {
+  color: #f7768e;
+  font-weight: 700;
+  font-size: 18px;
+  margin-top: 8px;
+}
+
+.disconnected .avatar {
+  opacity: 0.35;
+}

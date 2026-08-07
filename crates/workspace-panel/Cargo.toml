@@ -11,11 +11,18 @@ rust-version.workspace = true
 name = "workspace-panel"
 path = "src/main.rs"
 
-# gtk4 + gtk4-layer-shell dependencies are added in milestone M-P1 to keep
-# early builds fast; until then this is a stub binary.
 [dependencies]
 anyhow = { workspace = true }
+async-channel = "2"
+gtk4 = { version = "0.11", features = ["v4_12"] }
+gtk4-layer-shell = "0.8"
+serde_json = { workspace = true }
+tokio = { workspace = true }
+tracing = { workspace = true }
+tracing-subscriber = { workspace = true }
+workspace-core = { workspace = true }
 workspace-proto = { workspace = true }
+workspace-storage = { workspace = true }
 
 [lints]
 workspace = true
