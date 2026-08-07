@@ -35,6 +35,10 @@ pub mod error_code {
     pub const CONFLICT: &str = "CONFLICT";
     /// The daemon hit an internal error; details in `message`.
     pub const INTERNAL: &str = "INTERNAL";
+    /// Hyprland rejected or failed a dispatch we issued for this request.
+    pub const HYPRLAND: &str = "HYPRLAND";
+    /// The query matched several entities; candidates in `data`.
+    pub const AMBIGUOUS: &str = "AMBIGUOUS";
 }
 
 /// A request from a client.
@@ -57,6 +61,49 @@ pub enum Request {
         /// `None` means all.
         #[serde(default, skip_serializing_if = "Option::is_none")]
         topics: Option<Vec<String>>,
+    },
+    /// Create a project.
+    #[serde(rename = "project.create")]
+    ProjectCreate {
+        /// Display name ("Web Development").
+        name: String,
+        /// Explicit slug; derived from the name when omitted.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        slug: Option<String>,
+    },
+    /// Delete a project. Takes an exact slug — never fuzzy.
+    #[serde(rename = "project.delete")]
+    ProjectDelete {
+        /// Exact project slug.
+        slug: String,
+    },
+    /// Rename a project's display name (slug unchanged).
+    #[serde(rename = "project.rename")]
+    ProjectRename {
+        /// Exact project slug.
+        slug: String,
+        /// New display name.
+        name: String,
+    },
+    /// Switch to a project (fuzzy query allowed).
+    #[serde(rename = "project.switch")]
+    ProjectSwitch {
+        /// Slug, prefix, or fuzzy query.
+        project: String,
+    },
+    /// List all projects.
+    #[serde(rename = "project.list")]
+    ProjectList,
+    /// Assign a window to a project (and optionally a group) manually.
+    #[serde(rename = "window.assign")]
+    WindowAssign {
+        /// Canonical window address.
+        address: String,
+        /// Project slug, prefix, or fuzzy query.
+        project: String,
+        /// Group slug within the project.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        group: Option<String>,
     },
 }
 
@@ -169,9 +216,30 @@ pub struct DaemonStatus {
     pub projects: usize,
 }
 
+/// One project in `project.list` results and events.
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
+pub struct ProjectSummary {
+    /// Project slug.
+    pub slug: Slug,
+    /// Display name.
+    pub name: String,
+    /// Whether this is the active project.
+    pub active: bool,
+    /// Number of windows currently assigned to it.
+    pub windows: usize,
+    /// Group slugs defined in the project.
+    #[serde(default)]
+    pub groups: Vec<Slug>,
+    /// The Hyprland workspace name backing the project.
+    pub workspace: String,
+}
+
 /// Result of `state.snapshot`.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Snapshot {
+    /// All projects, in creation order.
+    #[serde(default)]
+    pub projects: Vec<ProjectSummary>,
     /// All tracked windows, sorted by address for deterministic output.
     pub windows: Vec<TrackedWindow>,
     /// All live workspaces, sorted by id.

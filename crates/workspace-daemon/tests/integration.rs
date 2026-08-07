@@ -84,6 +84,35 @@ impl TestClient {
         }
     }
 
+    /// Like `request`, but returns the full envelope so tests can assert on
+    /// error responses.
+    async fn request_raw(&mut self, request: Request) -> workspace_proto::ResponseEnvelope {
+        let id = self.next_id;
+        self.next_id += 1;
+        let mut payload = serde_json::to_string(&RequestEnvelope {
+            v: PROTOCOL_VERSION,
+            id,
+            request,
+        })
+        .unwrap();
+        payload.push('\n');
+        self.writer.write_all(payload.as_bytes()).await.unwrap();
+        loop {
+            let line = self
+                .reader
+                .next_line()
+                .await
+                .unwrap()
+                .expect("daemon closed connection");
+            if let Ok(ServerMessage::Response(response)) =
+                serde_json::from_str::<ServerMessage>(&line)
+                && response.id == id
+            {
+                return response;
+            }
+        }
+    }
+
     async fn next_event(&mut self) -> workspace_proto::EventEnvelope {
         loop {
             let line = self
@@ -304,4 +333,150 @@ async fn second_instance_is_rejected() {
 
     shutdown.cancel();
     daemon.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn project_lifecycle_and_switching() {
+    let (_dir, fake, shutdown, daemon, socket) = boot().await;
+    let mut client = TestClient::connect(&socket).await;
+    wait_for_snapshot(&mut client, "hydration", |s| s.hypr_connected).await;
+
+    // Create two projects.
+    let created = client
+        .request(Request::ProjectCreate {
+            name: "Web Development".into(),
+            slug: None,
+        })
+        .await;
+    assert_eq!(created["slug"], "web-development");
+    assert_eq!(created["workspace"], "web-development");
+    client
+        .request(Request::ProjectCreate {
+            name: "AI Research".into(),
+            slug: Some("ai".into()),
+        })
+        .await;
+
+    let list = client.request(Request::ProjectList).await;
+    assert_eq!(list.as_array().unwrap().len(), 2);
+
+    // Duplicate slug is refused.
+    let raw = client
+        .request_raw(Request::ProjectCreate {
+            name: "Другой".into(),
+            slug: Some("ai".into()),
+        })
+        .await;
+    assert!(!raw.ok);
+    assert_eq!(raw.error.unwrap().code, "CONFLICT");
+
+    // Fuzzy switch by unique prefix issues the right dispatch.
+    let switched = client
+        .request(Request::ProjectSwitch {
+            project: "web".into(),
+        })
+        .await;
+    assert_eq!(switched["slug"], "web-development");
+    assert!(
+        fake.dispatches()
+            .await
+            .contains(&"workspace name:web-development".to_string())
+    );
+
+    // Unknown project is a NOT_FOUND with candidates.
+    let raw = client
+        .request_raw(Request::ProjectSwitch {
+            project: "zzz".into(),
+        })
+        .await;
+    assert!(!raw.ok);
+    let error = raw.error.unwrap();
+    assert_eq!(error.code, "NOT_FOUND");
+    assert!(error.data.unwrap()["candidates"].is_array());
+
+    // Manual window assignment moves the window silently.
+    let assigned = client
+        .request(Request::WindowAssign {
+            address: "0xaaa1".into(),
+            project: "ai".into(),
+            group: None,
+        })
+        .await;
+    assert_eq!(assigned["project"], "ai");
+    assert!(
+        fake.dispatches()
+            .await
+            .contains(&"movetoworkspacesilent name:ai,address:0xaaa1".to_string())
+    );
+    let snapshot = wait_for_snapshot(&mut client, "assignment", |s| {
+        s.projects
+            .iter()
+            .any(|p| p.slug.as_str() == "ai" && p.windows == 1)
+    })
+    .await;
+    assert!(snapshot.windows[0].assignment.is_some());
+
+    // Status reflects the active project.
+    let status = client.request(Request::DaemonStatus).await;
+    assert_eq!(status["active_project"], "web-development");
+    assert_eq!(status["projects"], 2);
+
+    // Deleting the assigned project clears assignments.
+    client
+        .request(Request::ProjectDelete { slug: "ai".into() })
+        .await;
+    let snapshot = wait_for_snapshot(&mut client, "deletion", |s| s.projects.len() == 1).await;
+    assert!(snapshot.windows[0].assignment.is_none());
+
+    shutdown.cancel();
+    daemon.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn workspace_events_track_active_project() {
+    let (_dir, fake, shutdown, daemon, socket) = boot().await;
+    let mut client = TestClient::connect(&socket).await;
+    wait_for_snapshot(&mut client, "hydration", |s| s.hypr_connected).await;
+
+    client
+        .request(Request::ProjectCreate {
+            name: "Gaming".into(),
+            slug: None,
+        })
+        .await;
+
+    // The user focuses the project workspace by hand (keybind/waybar):
+    // active_project follows.
+    fake.emit("workspacev2>>-100,gaming").await;
+    let status = wait_for(&mut client, "manual switch tracked", |status| {
+        status["active_project"] == "gaming"
+    })
+    .await;
+    assert_eq!(status["active_project"], "gaming");
+
+    // Focusing a numeric workspace deactivates the project.
+    fake.emit("workspacev2>>1,1").await;
+    wait_for(&mut client, "deactivation", |status| {
+        status["active_project"].is_null()
+    })
+    .await;
+
+    shutdown.cancel();
+    daemon.await.unwrap().unwrap();
+}
+
+/// Poll daemon status until a predicate holds.
+async fn wait_for(
+    client: &mut TestClient,
+    what: &str,
+    predicate: impl Fn(&serde_json::Value) -> bool,
+) -> serde_json::Value {
+    for _ in 0..200 {
+        let status = client.request(Request::DaemonStatus).await;
+        if predicate(&status) {
+            return status;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("timed out waiting for: {what}");
 }

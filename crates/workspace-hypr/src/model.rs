@@ -37,7 +37,8 @@ impl WindowAddress {
 
 impl std::fmt::Display for WindowAddress {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str(&self.0)
+        // `pad` honors width/alignment flags (needed for table output).
+        f.pad(&self.0)
     }
 }
 

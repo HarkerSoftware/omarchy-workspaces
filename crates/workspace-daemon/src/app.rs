@@ -47,7 +47,10 @@ pub async fn run(options: AppOptions, shutdown: CancellationToken) -> anyhow::Re
         .with_context(|| format!("cannot bind {}", socket_path.display()))?;
     tracing::info!(socket = %socket_path.display(), "daemon listening");
 
-    let handles = actor::spawn(options.config.clone());
+    let handles = actor::spawn(
+        options.config.clone(),
+        workspace_hypr::HyprCtl::new(options.hypr_paths.clone()),
+    );
 
     let hypr = tokio::spawn(hypr_task::run(
         options.hypr_paths.clone(),

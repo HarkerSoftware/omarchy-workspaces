@@ -60,6 +60,34 @@ pub enum DomainEvent {
         /// Workspace name.
         name: String,
     },
+    /// A project was created.
+    #[serde(rename = "project.created")]
+    ProjectCreated {
+        /// Project slug.
+        slug: String,
+        /// Display name.
+        name: String,
+    },
+    /// A project was deleted.
+    #[serde(rename = "project.deleted")]
+    ProjectDeleted {
+        /// Project slug.
+        slug: String,
+    },
+    /// A project was renamed (slug unchanged).
+    #[serde(rename = "project.renamed")]
+    ProjectRenamed {
+        /// Project slug.
+        slug: String,
+        /// New display name.
+        name: String,
+    },
+    /// The active project changed (`None` = no project active).
+    #[serde(rename = "project.switched")]
+    ProjectSwitched {
+        /// Slug of the now-active project, if any.
+        slug: Option<String>,
+    },
     /// The Hyprland event socket connected or dropped.
     #[serde(rename = "daemon.hypr_connection")]
     HyprConnection {
@@ -81,6 +109,10 @@ impl DomainEvent {
             | Self::WindowTitleChanged { .. }
             | Self::WindowFocused { .. } => "windows",
             Self::WorkspaceChanged { .. } => "workspaces",
+            Self::ProjectCreated { .. }
+            | Self::ProjectDeleted { .. }
+            | Self::ProjectRenamed { .. }
+            | Self::ProjectSwitched { .. } => "projects",
             Self::HyprConnection { .. } | Self::ShuttingDown => "daemon",
         }
     }

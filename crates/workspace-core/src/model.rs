@@ -93,7 +93,8 @@ impl Slug {
 
 impl fmt::Display for Slug {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.write_str(self.as_str())
+        // `pad` honors width/alignment flags (needed for table output).
+        f.pad(self.as_str())
     }
 }
 
@@ -106,7 +107,7 @@ impl<'de> Deserialize<'de> for Slug {
 
 /// A named project: a declarative set of windows (via [`AppSlot`]s) organized
 /// into [`Group`]s, mapped onto Hyprland named workspaces.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Project {
     /// Stable identity; survives renames.
     pub id: ProjectId,
@@ -140,7 +141,7 @@ impl Project {
 }
 
 /// A named group of windows inside a project (e.g. "backend", "frontend").
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct Group {
     /// Group slug, unique within its project.
     pub slug: Slug,
@@ -152,7 +153,7 @@ pub struct Group {
 }
 
 /// One desired window in a project: how to recognize it and how to place it.
-#[derive(Debug, Clone, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
 pub struct AppSlot {
     /// Stable slot identity, referenced by launch dependencies and restore progress.
     pub slot_id: Uuid,
@@ -171,7 +172,7 @@ pub struct AppSlot {
 /// Matching is scored (see the reconcile logic): executable path is the
 /// strongest signal, then class, then initial class, with title patterns as a
 /// tie-breaker only.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct WindowIdentity {
     /// Exact window class (e.g. `firefox`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -188,7 +189,7 @@ pub struct WindowIdentity {
 }
 
 /// Desired placement for a window when restored.
-#[derive(Debug, Clone, Default, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
 pub struct Placement {
     /// Whether the window should float.
     #[serde(default)]
