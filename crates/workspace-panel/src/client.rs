@@ -28,6 +28,21 @@ pub enum UiUpdate {
 pub enum UiRequest {
     /// Switch to a project by slug.
     Switch(String),
+    /// Create a project with this display name.
+    Create(String),
+    /// Rename a project (slug stays).
+    Rename {
+        /// Exact project slug.
+        slug: String,
+        /// New display name.
+        name: String,
+    },
+    /// Delete a project by exact slug.
+    Delete(String),
+    /// Capture the project's current windows (`project.save`).
+    Save(String),
+    /// Restore the project (adopt + launch missing).
+    Restore(String),
 }
 
 /// Spawn the connection thread. Returns the channel endpoints for the UI.
@@ -120,12 +135,19 @@ async fn connection(
         tokio::select! {
             request = requests.recv() => {
                 let Ok(request) = request else { return Ok(()) };
-                match request {
-                    UiRequest::Switch(slug) => {
-                        send(&mut writer, next_id, Request::ProjectSwitch { project: slug }).await?;
-                        next_id += 1;
-                    }
-                }
+                let request = match request {
+                    UiRequest::Switch(slug) => Request::ProjectSwitch { project: slug },
+                    UiRequest::Create(name) => Request::ProjectCreate { name, slug: None },
+                    UiRequest::Rename { slug, name } => Request::ProjectRename { slug, name },
+                    UiRequest::Delete(slug) => Request::ProjectDelete { slug },
+                    UiRequest::Save(slug) => Request::ProjectSave { project: Some(slug) },
+                    UiRequest::Restore(slug) => Request::ProjectRestore {
+                        project: Some(slug),
+                        dry_run: false,
+                    },
+                };
+                send(&mut writer, next_id, request).await?;
+                next_id += 1;
             }
             line = lines.next_line() => {
                 let Some(line) = line? else {

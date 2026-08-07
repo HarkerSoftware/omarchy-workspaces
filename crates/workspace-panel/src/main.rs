@@ -102,6 +102,15 @@ fn build_ui(app: &gtk::Application) {
     status.set_tooltip_text(Some("connecting to workspace-daemon"));
     root.append(&status);
 
+    let spacer = gtk::Box::new(gtk::Orientation::Vertical, 0);
+    spacer.set_vexpand(true);
+    root.append(&spacer);
+
+    let add_button = gtk::Button::with_label("+");
+    add_button.add_css_class("add-project");
+    add_button.set_tooltip_text(Some("New project"));
+    root.append(&add_button);
+
     // Hover expansion: enter starts the expand timer, leave the collapse
     // timer; re-entering cancels a pending collapse (no flicker).
     let motion = gtk::EventControllerMotion::new();
@@ -136,6 +145,37 @@ fn build_ui(app: &gtk::Application) {
     window.set_child(Some(&root));
 
     let (updates, requests) = client::spawn(None);
+
+    // "+" opens a small popover with a name entry.
+    {
+        let requests = requests.clone();
+        add_button.connect_clicked(move |button| {
+            let popover = gtk::Popover::new();
+            popover.set_parent(button);
+            popover.set_position(gtk::PositionType::Right);
+            let entry = gtk::Entry::new();
+            entry.set_placeholder_text(Some("Project name"));
+            entry.set_width_chars(18);
+            let requests = requests.clone();
+            entry.connect_activate(glib::clone!(
+                #[weak]
+                popover,
+                move |entry| {
+                    let name = entry.text().trim().to_owned();
+                    if !name.is_empty() {
+                        let _ = requests.send_blocking(UiRequest::Create(name));
+                    }
+                    popover.popdown();
+                }
+            ));
+            popover.set_child(Some(&entry));
+            popover.connect_closed(|popover| {
+                let popover = popover.clone();
+                glib::idle_add_local_once(move || popover.unparent());
+            });
+            popover.popup();
+        });
+    }
 
     glib::spawn_future_local(glib::clone!(
         #[weak]
@@ -226,14 +266,127 @@ fn rebuild_rows(
         row.set_tooltip_text(Some(&project.name));
 
         let slug = project.slug.as_str().to_owned();
-        let requests = requests.clone();
+        let switch_requests = requests.clone();
         let gesture = gtk::GestureClick::new();
         gesture.connect_released(move |_, _, _, _| {
-            let _ = requests.send_blocking(UiRequest::Switch(slug.clone()));
+            let _ = switch_requests.send_blocking(UiRequest::Switch(slug.clone()));
         });
         row.add_controller(gesture);
+
+        // Right-click: management menu.
+        let menu_gesture = gtk::GestureClick::new();
+        menu_gesture.set_button(3);
+        let menu_requests = requests.clone();
+        let menu_project = project.clone();
+        let menu_row = row.clone();
+        menu_gesture.connect_released(move |_, _, _, _| {
+            open_row_menu(&menu_row, &menu_project, &menu_requests);
+        });
+        row.add_controller(menu_gesture);
+
         list.append(&row);
     }
+}
+
+/// The right-click management menu for one project row.
+fn open_row_menu(
+    row: &gtk::ListBoxRow,
+    project: &ProjectSummary,
+    requests: &async_channel::Sender<UiRequest>,
+) {
+    let popover = gtk::Popover::new();
+    popover.set_parent(row);
+    popover.set_position(gtk::PositionType::Right);
+
+    let menu = gtk::Box::new(gtk::Orientation::Vertical, 2);
+    menu.add_css_class("row-menu");
+
+    let header = gtk::Label::new(Some(&project.name));
+    header.add_css_class("menu-header");
+    header.set_halign(gtk::Align::Start);
+    menu.append(&header);
+
+    let slug = project.slug.as_str().to_owned();
+    let action_button = |label: &str, request: UiRequest| {
+        let button = gtk::Button::with_label(label);
+        button.add_css_class("menu-btn");
+        let requests = requests.clone();
+        let popover = popover.clone();
+        let request = std::cell::Cell::new(Some(request));
+        button.connect_clicked(move |_| {
+            if let Some(request) = request.take() {
+                let _ = requests.send_blocking(request);
+            }
+            popover.popdown();
+        });
+        button
+    };
+    menu.append(&action_button(
+        "Save windows",
+        UiRequest::Save(slug.clone()),
+    ));
+    menu.append(&action_button("Restore", UiRequest::Restore(slug.clone())));
+
+    // Rename: swap the popover content for an entry.
+    let rename = gtk::Button::with_label("Rename…");
+    rename.add_css_class("menu-btn");
+    {
+        let popover = popover.clone();
+        let requests = requests.clone();
+        let slug = slug.clone();
+        let current = project.name.clone();
+        rename.connect_clicked(move |_| {
+            let entry = gtk::Entry::new();
+            entry.set_text(&current);
+            entry.set_width_chars(18);
+            entry.select_region(0, -1);
+            let requests = requests.clone();
+            let slug = slug.clone();
+            entry.connect_activate(glib::clone!(
+                #[weak]
+                popover,
+                move |entry| {
+                    let name = entry.text().trim().to_owned();
+                    if !name.is_empty() {
+                        let _ = requests.send_blocking(UiRequest::Rename {
+                            slug: slug.clone(),
+                            name,
+                        });
+                    }
+                    popover.popdown();
+                }
+            ));
+            popover.set_child(Some(&entry));
+            entry.grab_focus();
+        });
+    }
+    menu.append(&rename);
+
+    // Delete: two-step confirmation in place.
+    let delete = gtk::Button::with_label("Delete…");
+    delete.add_css_class("menu-btn");
+    {
+        let popover = popover.clone();
+        let requests = requests.clone();
+        let armed = std::cell::Cell::new(false);
+        delete.connect_clicked(move |button| {
+            if armed.replace(true) {
+                let _ = requests.send_blocking(UiRequest::Delete(slug.clone()));
+                popover.popdown();
+            } else {
+                button.set_label("Really delete?");
+                button.add_css_class("destructive");
+            }
+        });
+    }
+    menu.append(&delete);
+
+    popover.set_child(Some(&menu));
+    popover.connect_closed(|popover| {
+        let popover = popover.clone();
+        glib::idle_add_local_once(move || popover.unparent());
+    });
+    popover.popup();
 }
 
 /// Up to two initial letters of the display name ("Web Development" → "WD").
