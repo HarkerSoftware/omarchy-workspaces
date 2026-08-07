@@ -247,6 +247,11 @@ impl StateActor {
                 self.world
                     .hydrate(windows, workspaces, monitors, focused_window);
                 self.apply_recovery();
+                // Windows already sitting on project workspaces join them.
+                let addresses: Vec<String> = self.world.windows.keys().cloned().collect();
+                for address in addresses {
+                    self.sync_inherited_assignment(&address);
+                }
                 if !self.hydrated_once {
                     self.hydrated_once = true;
                     self.schedule_restore_on_boot();
@@ -264,6 +269,7 @@ impl StateActor {
             } => {
                 self.world.upsert_window(&address, stable_id, facts);
                 self.apply_rules(&address);
+                self.sync_inherited_assignment(&address);
             }
             Command::Request { request, resp } => match self.handle_request(request) {
                 Outcome::Reply(result) => {
@@ -375,6 +381,7 @@ impl StateActor {
                 let address = address.as_str().to_owned();
                 self.world
                     .set_window_workspace(&address, workspace_id, &workspace);
+                self.sync_inherited_assignment(&address);
                 self.emit(DomainEvent::WindowMoved { address, workspace });
             }
             HyprEvent::WindowTitle { address, title } => {
@@ -471,13 +478,59 @@ impl StateActor {
         }
     }
 
+    /// Keep membership in sync with the window's workspace for windows the
+    /// user placed there implicitly: a window on a project (or group parking)
+    /// workspace joins that project with an `Inherited` assignment; moving an
+    /// inherited window to a foreign workspace removes it. Sticky sources
+    /// (Manual/Restore/Rule) are never touched.
+    fn sync_inherited_assignment(&mut self, address: &str) {
+        let Some(window) = self.world.windows.get(address) else {
+            return;
+        };
+        if !matches!(window.assigned_by, None | Some(AssignmentSource::Inherited)) {
+            return;
+        }
+        let prefix = self.config.general.workspace_prefix.clone();
+        let target = match ws_names::parse(&prefix, &window.facts.workspace) {
+            ws_names::ParsedName::Project(slug) => self
+                .projects
+                .iter()
+                .find(|p| p.slug == slug)
+                .map(|p| (p.id, None)),
+            ws_names::ParsedName::Group { project, group } => self
+                .projects
+                .iter()
+                .find(|p| p.slug == project && p.groups.iter().any(|g| g.slug == group))
+                .map(|p| (p.id, Some(group))),
+            ws_names::ParsedName::Foreign => None,
+        };
+        let window = self.world.windows.get_mut(address).expect("checked above");
+        if window.assignment == target {
+            return;
+        }
+        match target {
+            Some(assignment) => {
+                window.assignment = Some(assignment);
+                window.assigned_by = Some(AssignmentSource::Inherited);
+            }
+            None => {
+                window.assignment = None;
+                window.assigned_by = None;
+            }
+        }
+        self.persist_runtime();
+    }
+
     /// Evaluate rules for a freshly enriched window and act per config.
-    /// Never overrides an existing assignment (Manual > Restore > Rule).
+    /// Overrides only `Inherited` assignments (Manual > Restore > Rule >
+    /// Inherited).
     fn apply_rules(&mut self, address: &str) {
         let Some(window) = self.world.windows.get(address) else {
             return;
         };
-        if window.assignment.is_some() {
+        if window.assignment.is_some()
+            && !matches!(window.assigned_by, Some(AssignmentSource::Inherited))
+        {
             return;
         }
         let facts = window.facts.clone();
@@ -621,6 +674,9 @@ impl StateActor {
             };
             let assigned_by = match saved.source.as_str() {
                 "manual" => AssignmentSource::Manual,
+                "inherited" => AssignmentSource::Inherited,
+                // Slot identity is not recoverable; nil keeps the stickiness.
+                "restore" => AssignmentSource::Restore(uuid::Uuid::nil()),
                 rule => AssignmentSource::Rule(rule.to_owned()),
             };
             let (project_id, group) = (project.id, saved.group.clone());
@@ -662,6 +718,7 @@ impl StateActor {
             let source = match &window.assigned_by {
                 Some(AssignmentSource::Rule(rule)) => rule.clone(),
                 Some(AssignmentSource::Restore(_)) => "restore".to_owned(),
+                Some(AssignmentSource::Inherited) => "inherited".to_owned(),
                 _ => "manual".to_owned(),
             };
             state.assignments.insert(

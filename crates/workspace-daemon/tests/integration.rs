@@ -1067,3 +1067,100 @@ async fn duplicate_export_import_search() {
     shutdown.cancel();
     daemon.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn windows_inherit_membership_from_project_workspaces() {
+    let (_dir, fake, shutdown, daemon, socket) = boot().await;
+    let mut client = TestClient::connect(&socket).await;
+    wait_for_snapshot(&mut client, "hydration", |s| s.hypr_connected).await;
+
+    client
+        .request(Request::ProjectCreate {
+            name: "Web Dev".into(),
+            slug: Some("web".into()),
+        })
+        .await;
+
+    // A window opens directly on the project workspace: it joins the project
+    // with an inherited assignment.
+    let kitty_on_web = r#"[{
+        "address": "0xeee5",
+        "mapped": true, "hidden": false,
+        "at": [0, 0], "size": [800, 600],
+        "workspace": {"id": -100, "name": "web"},
+        "floating": false, "pinned": false, "fullscreen": 0,
+        "monitor": 0,
+        "class": "kitty", "title": "shell",
+        "initialClass": "kitty", "initialTitle": "kitty",
+        "pid": 900, "xwayland": false,
+        "grouped": [], "focusHistoryID": 0,
+        "stableId": "eee"
+    }]"#;
+    fake.set_response("j/clients", kitty_on_web).await;
+    fake.emit("openwindow>>eee5,web,kitty,shell").await;
+
+    let snapshot = wait_for_snapshot(&mut client, "inherited join", |s| {
+        s.windows
+            .iter()
+            .any(|w| w.address == "0xeee5" && w.assignment.is_some())
+    })
+    .await;
+    let window = snapshot
+        .windows
+        .iter()
+        .find(|w| w.address == "0xeee5")
+        .unwrap();
+    assert!(matches!(
+        window.assigned_by,
+        Some(workspace_core::world::AssignmentSource::Inherited)
+    ));
+
+    // Moving it off to a numeric workspace removes the inherited membership…
+    fake.emit("movewindowv2>>eee5,1,1").await;
+    wait_for_snapshot(&mut client, "inherited leave", |s| {
+        s.windows
+            .iter()
+            .any(|w| w.address == "0xeee5" && w.assignment.is_none())
+    })
+    .await;
+
+    // …and moving it back re-joins.
+    fake.emit("movewindowv2>>eee5,-100,web").await;
+    wait_for_snapshot(&mut client, "inherited rejoin", |s| {
+        s.projects
+            .iter()
+            .any(|p| p.slug.as_str() == "web" && p.windows == 1)
+    })
+    .await;
+
+    // Manual assignment is sticky: moving the manually assigned firefox
+    // window around never clears it.
+    client
+        .request(Request::WindowAssign {
+            address: "0xaaa1".into(),
+            project: "web".into(),
+            group: None,
+        })
+        .await;
+    fake.emit("movewindowv2>>aaa1,3,3").await;
+    // Give the daemon a moment, then confirm the assignment survived.
+    tokio::time::sleep(Duration::from_millis(100)).await;
+    let snapshot = wait_for_snapshot(&mut client, "manual sticky", |s| {
+        s.windows
+            .iter()
+            .any(|w| w.address == "0xaaa1" && w.assignment.is_some())
+    })
+    .await;
+    let window = snapshot
+        .windows
+        .iter()
+        .find(|w| w.address == "0xaaa1")
+        .unwrap();
+    assert!(matches!(
+        window.assigned_by,
+        Some(workspace_core::world::AssignmentSource::Manual)
+    ));
+
+    shutdown.cancel();
+    daemon.await.unwrap().unwrap();
+}

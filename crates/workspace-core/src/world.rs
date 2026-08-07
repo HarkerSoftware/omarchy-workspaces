@@ -50,15 +50,21 @@ pub struct WindowFacts {
 }
 
 /// How a window came to be assigned to a project.
+///
+/// Precedence when sources compete: `Manual` > `Restore` > `Rule` >
+/// `Inherited`. Only `Inherited` assignments follow the window when it moves
+/// between workspaces; the others are sticky.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum AssignmentSource {
     /// A rule matched (rule name recorded).
     Rule(String),
-    /// The user assigned it explicitly. Never overridden by rules.
+    /// The user assigned it explicitly. Never overridden.
     Manual,
     /// Correlated to a restore slot.
     Restore(uuid::Uuid),
+    /// The window opened on (or moved to) the project's workspace.
+    Inherited,
 }
 
 /// A live window plus our annotations.
