@@ -537,6 +537,10 @@ impl StateActor {
             Request::ConfigReload => self.config_reload(),
             Request::ProjectSave { project } => self.project_save(project),
             Request::ProjectRestore { project, dry_run } => self.project_restore(project, dry_run),
+            Request::ProjectDuplicate { project, name } => self.project_duplicate(&project, name),
+            Request::ProjectExport { project } => self.project_export(&project),
+            Request::ProjectImport { toml, force } => self.project_import(&toml, force),
+            Request::Search { query } => self.search(&query),
             Request::ProjectCreate { name, slug } => self.project_create(name, slug),
             Request::ProjectDelete { slug } => self.project_delete(&slug),
             Request::ProjectRename { slug, name } => self.project_rename(&slug, name),
@@ -832,6 +836,143 @@ impl StateActor {
                 }
             });
         }
+    }
+
+    // ---- duplicate / export / import / search -------------------------------
+
+    fn project_duplicate(&mut self, query: &str, name: String) -> Outcome {
+        let mut copy = match self.resolve(query) {
+            Ok(project) => project.clone(),
+            Err(error) => return Outcome::Reply(Err(error)),
+        };
+        let slug = match Slug::from_display_name(&name) {
+            Ok(slug) => slug,
+            Err(error) => return Outcome::Reply(Err(bad_request(error.to_string()))),
+        };
+        if self.projects.iter().any(|p| p.slug == slug) {
+            return Outcome::Reply(Err(conflict(format!("project '{slug}' already exists"))));
+        }
+        copy.id = workspace_core::model::ProjectId::new();
+        copy.slug = slug.clone();
+        copy.name = name.clone();
+        for slot in &mut copy.apps {
+            slot.slot_id = uuid::Uuid::new_v4();
+        }
+        let summary = self.summary(&copy);
+        self.persist_project(&copy);
+        self.projects.push(copy);
+        self.emit(DomainEvent::ProjectCreated {
+            slug: slug.as_str().to_owned(),
+            name,
+        });
+        Outcome::Reply(Ok(json(&summary)))
+    }
+
+    fn project_export(&mut self, query: &str) -> Outcome {
+        let project = match self.resolve(query) {
+            Ok(project) => project.clone(),
+            Err(error) => return Outcome::Reply(Err(error)),
+        };
+        let file = workspace_storage::projects::ProjectFile {
+            version: workspace_storage::projects::PROJECT_VERSION,
+            project: project.clone(),
+        };
+        match toml::to_string_pretty(&file) {
+            Ok(text) => Outcome::Reply(Ok(
+                serde_json::json!({ "slug": project.slug, "toml": text }),
+            )),
+            Err(error) => Outcome::Reply(Err(bad_request(error.to_string()))),
+        }
+    }
+
+    fn project_import(&mut self, text: &str, force: bool) -> Outcome {
+        let file: workspace_storage::projects::ProjectFile = match toml::from_str(text) {
+            Ok(file) => file,
+            Err(error) => {
+                return Outcome::Reply(Err(bad_request(format!("invalid project TOML: {error}"))));
+            }
+        };
+        if file.version > workspace_storage::projects::PROJECT_VERSION {
+            return Outcome::Reply(Err(bad_request(format!(
+                "project file schema v{} is newer than supported",
+                file.version
+            ))));
+        }
+        let mut project = file.project;
+        // Imports always get a fresh identity to avoid id collisions.
+        project.id = workspace_core::model::ProjectId::new();
+        let colliding = self.projects.iter().position(|p| p.slug == project.slug);
+        match colliding {
+            Some(index) if force => {
+                let replaced = self.projects.remove(index);
+                for window in self.world.windows.values_mut() {
+                    if window
+                        .assignment
+                        .as_ref()
+                        .is_some_and(|(id, _)| *id == replaced.id)
+                    {
+                        window.assignment = None;
+                        window.assigned_by = None;
+                    }
+                }
+            }
+            Some(_) => {
+                // Re-slug: append -2, -3, … until free.
+                let base = project.slug.as_str().to_owned();
+                let mut n = 2;
+                loop {
+                    let candidate = Slug::parse(&format!("{base}-{n}")).expect("valid suffix");
+                    if !self.projects.iter().any(|p| p.slug == candidate) {
+                        project.slug = candidate;
+                        break;
+                    }
+                    n += 1;
+                }
+            }
+            None => {}
+        }
+        let summary = self.summary(&project);
+        self.persist_project(&project);
+        let slug = project.slug.as_str().to_owned();
+        let name = project.name.clone();
+        self.projects.push(project);
+        self.emit(DomainEvent::ProjectCreated { slug, name });
+        Outcome::Reply(Ok(json(&summary)))
+    }
+
+    fn search(&mut self, query: &str) -> Outcome {
+        let mut results: Vec<serde_json::Value> = Vec::new();
+        for project in &self.projects {
+            let score = search::fuzzy_score(query, project.slug.as_str())
+                .into_iter()
+                .chain(search::fuzzy_score(query, &project.name))
+                .max();
+            if let Some(score) = score {
+                results.push(serde_json::json!({
+                    "kind": "project",
+                    "slug": project.slug,
+                    "label": project.name,
+                    "score": score,
+                }));
+            }
+        }
+        for window in self.world.windows.values() {
+            let score = search::fuzzy_score(query, &window.facts.class)
+                .into_iter()
+                .chain(search::fuzzy_score(query, &window.facts.title))
+                .max();
+            if let Some(score) = score {
+                results.push(serde_json::json!({
+                    "kind": "window",
+                    "address": window.address,
+                    "label": format!("{} — {}", window.facts.class, window.facts.title),
+                    "score": score,
+                }));
+            }
+        }
+        results.sort_by_key(|r| std::cmp::Reverse(r["score"].as_u64().unwrap_or(0)));
+        results.truncate(20);
+        Outcome::Reply(Ok(serde_json::json!({ "results": results })))
     }
 
     // ---- groups -------------------------------------------------------------

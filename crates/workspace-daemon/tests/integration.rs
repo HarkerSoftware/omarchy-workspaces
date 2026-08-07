@@ -988,3 +988,82 @@ async fn group_lifecycle_hide_show_focus_move() {
     shutdown.cancel();
     daemon.await.unwrap().unwrap();
 }
+
+#[tokio::test]
+async fn duplicate_export_import_search() {
+    let (_dir, _fake, shutdown, daemon, socket) = boot().await;
+    let mut client = TestClient::connect(&socket).await;
+    wait_for_snapshot(&mut client, "hydration", |s| s.hypr_connected).await;
+
+    client
+        .request(Request::ProjectCreate {
+            name: "Web Development".into(),
+            slug: None,
+        })
+        .await;
+
+    // Duplicate: fresh id/slots, new slug.
+    let copy = client
+        .request(Request::ProjectDuplicate {
+            project: "web-development".into(),
+            name: "Web Two".into(),
+        })
+        .await;
+    assert_eq!(copy["slug"], "web-two");
+
+    // Export → import round trip; slug collision re-slugs to -2.
+    let exported = client
+        .request(Request::ProjectExport {
+            project: "web-development".into(),
+        })
+        .await;
+    let toml_text = exported["toml"].as_str().unwrap().to_owned();
+    assert!(toml_text.contains("slug = \"web-development\""));
+    let imported = client
+        .request(Request::ProjectImport {
+            toml: toml_text.clone(),
+            force: false,
+        })
+        .await;
+    assert_eq!(imported["slug"], "web-development-2");
+
+    // Force-import replaces instead.
+    let imported = client
+        .request(Request::ProjectImport {
+            toml: toml_text,
+            force: true,
+        })
+        .await;
+    assert_eq!(imported["slug"], "web-development");
+    let list = client.request(Request::ProjectList).await;
+    assert_eq!(list.as_array().unwrap().len(), 3);
+
+    // Search finds projects and windows.
+    let found = client
+        .request(Request::Search {
+            query: "web".into(),
+        })
+        .await;
+    let kinds: Vec<&str> = found["results"]
+        .as_array()
+        .unwrap()
+        .iter()
+        .filter_map(|r| r["kind"].as_str())
+        .collect();
+    assert!(kinds.contains(&"project"));
+    let found = client
+        .request(Request::Search {
+            query: "firefox".into(),
+        })
+        .await;
+    assert!(
+        found["results"]
+            .as_array()
+            .unwrap()
+            .iter()
+            .any(|r| r["kind"] == "window")
+    );
+
+    shutdown.cancel();
+    daemon.await.unwrap().unwrap();
+}

@@ -123,6 +123,36 @@ pub enum Request {
     /// running configuration untouched.
     #[serde(rename = "config.reload")]
     ConfigReload,
+    /// Duplicate a project under a new name.
+    #[serde(rename = "project.duplicate")]
+    ProjectDuplicate {
+        /// Source project query.
+        project: String,
+        /// Display name for the copy.
+        name: String,
+    },
+    /// Export a project definition as a self-contained TOML document.
+    #[serde(rename = "project.export")]
+    ProjectExport {
+        /// Project query.
+        project: String,
+    },
+    /// Import a project from an exported TOML document.
+    #[serde(rename = "project.import")]
+    ProjectImport {
+        /// The exported TOML text.
+        toml: String,
+        /// Replace an existing project with the same slug instead of
+        /// re-slugging the import.
+        #[serde(default)]
+        force: bool,
+    },
+    /// Fuzzy-search projects and windows.
+    #[serde(rename = "search")]
+    Search {
+        /// The query.
+        query: String,
+    },
     /// Create a group inside a project.
     #[serde(rename = "group.create")]
     GroupCreate {

@@ -83,6 +83,34 @@ enum Command {
         #[arg(long)]
         dry_run: bool,
     },
+    /// Duplicate a project under a new name.
+    Duplicate {
+        /// Source project query.
+        project: String,
+        /// Display name for the copy.
+        name: String,
+    },
+    /// Export a project definition as TOML.
+    Export {
+        /// Project query.
+        project: String,
+        /// Write to a file instead of stdout.
+        #[arg(short, long, value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
+    /// Import a project from an exported TOML file.
+    Import {
+        /// The exported file.
+        file: PathBuf,
+        /// Replace an existing project with the same slug.
+        #[arg(long)]
+        force: bool,
+    },
+    /// Fuzzy-search projects and windows.
+    Search {
+        /// The query.
+        query: String,
+    },
     /// Manage window groups inside a project.
     Group {
         #[command(subcommand)]
@@ -223,6 +251,12 @@ async fn main() -> std::process::ExitCode {
         Command::Restore { project, dry_run } => {
             commands::restore(cli.socket, project, dry_run, cli.json).await
         }
+        Command::Duplicate { project, name } => {
+            commands::duplicate(cli.socket, project, name).await
+        }
+        Command::Export { project, output } => commands::export(cli.socket, project, output).await,
+        Command::Import { file, force } => commands::import(cli.socket, file, force).await,
+        Command::Search { query } => commands::search(cli.socket, query, cli.json).await,
         Command::Group { cmd } => commands::group(cli.socket, cmd).await,
         Command::Rules {
             cmd: RulesCmd::Test { address },

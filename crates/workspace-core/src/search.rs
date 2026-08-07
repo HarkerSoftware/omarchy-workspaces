@@ -29,6 +29,15 @@ pub enum Resolution<'a> {
 /// considered decisive.
 const DECISIVE_RATIO: f32 = 1.5;
 
+/// Plain fuzzy score of `query` against `haystack` (`None` = no match).
+/// Used by the `search` request for ad-hoc ranking.
+pub fn fuzzy_score(query: &str, haystack: &str) -> Option<u32> {
+    let mut matcher = Matcher::new(Config::DEFAULT);
+    let pattern = Pattern::parse(query, CaseMatching::Ignore, Normalization::Smart);
+    let mut buf = Vec::new();
+    pattern.score(Utf32Str::new(haystack, &mut buf), &mut matcher)
+}
+
 /// Resolve `query` to a project. See the module docs for the policy.
 pub fn resolve<'a>(query: &str, projects: &'a [Project]) -> Resolution<'a> {
     if projects.is_empty() {

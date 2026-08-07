@@ -285,6 +285,102 @@ fn print_plan(plan: &serde_json::Value) {
     }
 }
 
+/// `workspace duplicate <project> <new-name>`.
+pub async fn duplicate(socket: Option<PathBuf>, project: String, name: String) -> u8 {
+    match one_request(socket, Request::ProjectDuplicate { project, name }).await {
+        Ok(result) => {
+            if let Ok(summary) = serde_json::from_value::<ProjectSummary>(result) {
+                println!("duplicated as '{}' ({})", summary.name, summary.slug);
+            }
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+/// `workspace export <project> [-o file]`.
+pub async fn export(socket: Option<PathBuf>, project: String, output: Option<PathBuf>) -> u8 {
+    match one_request(socket, Request::ProjectExport { project }).await {
+        Ok(result) => {
+            let toml = result["toml"].as_str().unwrap_or_default();
+            match output {
+                Some(path) => match std::fs::write(&path, toml) {
+                    Ok(()) => {
+                        println!(
+                            "exported '{}' to {}",
+                            result["slug"].as_str().unwrap_or("?"),
+                            path.display()
+                        );
+                        0
+                    }
+                    Err(error) => {
+                        eprintln!("error: cannot write {}: {error}", path.display());
+                        1
+                    }
+                },
+                None => {
+                    print!("{toml}");
+                    0
+                }
+            }
+        }
+        Err(code) => code,
+    }
+}
+
+/// `workspace import <file> [--force]`.
+pub async fn import(socket: Option<PathBuf>, file: PathBuf, force: bool) -> u8 {
+    let toml = match std::fs::read_to_string(&file) {
+        Ok(toml) => toml,
+        Err(error) => {
+            eprintln!("error: cannot read {}: {error}", file.display());
+            return 1;
+        }
+    };
+    match one_request(socket, Request::ProjectImport { toml, force }).await {
+        Ok(result) => {
+            if let Ok(summary) = serde_json::from_value::<ProjectSummary>(result) {
+                println!("imported '{}' as {}", summary.name, summary.slug);
+            }
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+/// `workspace search <query>`.
+pub async fn search(socket: Option<PathBuf>, query: String, json: bool) -> u8 {
+    match one_request(socket, Request::Search { query }).await {
+        Ok(result) => {
+            if json {
+                println!("{result}");
+                return 0;
+            }
+            let results = result["results"].as_array().cloned().unwrap_or_default();
+            if results.is_empty() {
+                println!("no matches");
+                return 0;
+            }
+            for entry in results {
+                match entry["kind"].as_str() {
+                    Some("project") => println!(
+                        "project  {:<20} {}",
+                        entry["slug"].as_str().unwrap_or("?"),
+                        entry["label"].as_str().unwrap_or("")
+                    ),
+                    _ => println!(
+                        "window   {:<20} {}",
+                        entry["address"].as_str().unwrap_or("?"),
+                        entry["label"].as_str().unwrap_or("")
+                    ),
+                }
+            }
+            0
+        }
+        Err(code) => code,
+    }
+}
+
 /// `workspace group <cmd>` — group management.
 pub async fn group(socket: Option<PathBuf>, cmd: crate::GroupCmd) -> u8 {
     use crate::GroupCmd;
