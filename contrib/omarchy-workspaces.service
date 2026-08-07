@@ -11,7 +11,7 @@
 
 [Unit]
 Description=omarchy-workspaces daemon (workspace/project manager for Hyprland)
-Documentation=https://github.com/tylerharker/omarchy-workspaces
+Documentation=https://github.com/HarkerSoftware/omarchy-workspaces
 PartOf=graphical-session.target
 After=graphical-session.target
 

@@ -1,13 +1,13 @@
 #!/usr/bin/env bash
 # Installer for omarchy-workspaces release binaries.
 #
-#   curl -fsSL https://github.com/tylerharker/omarchy-workspaces/raw/main/packaging/install.sh | bash
+#   curl -fsSL https://github.com/HarkerSoftware/omarchy-workspaces/raw/main/packaging/install.sh | bash
 #
 # Installs to ~/.local/bin (no sudo). Verifies checksums. Never edits your
 # Hyprland config — it prints the enable commands instead.
 set -euo pipefail
 
-REPO="tylerharker/omarchy-workspaces"
+REPO="HarkerSoftware/omarchy-workspaces"
 DEST="${DEST:-$HOME/.local/bin}"
 
 if [[ "$(uname -m)" != "x86_64" ]]; then
