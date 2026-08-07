@@ -113,6 +113,7 @@ async fn connection(
     requests: &async_channel::Receiver<UiRequest>,
 ) -> anyhow::Result<()> {
     let stream = UnixStream::connect(path).await?;
+    tracing::info!("connected to workspace-daemon");
     let (read_half, mut writer) = stream.into_split();
     let mut lines = BufReader::new(read_half).lines();
     let mut next_id: u64 = 1;

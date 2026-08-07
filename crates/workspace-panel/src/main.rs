@@ -63,7 +63,13 @@ fn main() -> glib::ExitCode {
         .with_writer(std::io::stderr)
         .init();
 
-    let app = gtk::Application::builder().application_id(APP_ID).build();
+    // NON_UNIQUE: a panel is a per-session process, not a D-Bus-activated
+    // single instance — a second launch must not re-activate (and re-build UI
+    // in) an existing process.
+    let app = gtk::Application::builder()
+        .application_id(APP_ID)
+        .flags(gtk::gio::ApplicationFlags::NON_UNIQUE)
+        .build();
     app.connect_activate(build_ui);
     // Never handle CLI args as files.
     app.run_with_args::<&str>(&[])
@@ -177,12 +183,14 @@ fn build_ui(app: &gtk::Application) {
         });
     }
 
+    // Strong references: these widgets live as long as the process, and a
+    // silently-dying update loop would freeze the rail at its last state.
     glib::spawn_future_local(glib::clone!(
-        #[weak]
+        #[strong]
         list,
-        #[weak]
+        #[strong]
         status,
-        #[weak]
+        #[strong]
         root,
         #[strong]
         ui,
