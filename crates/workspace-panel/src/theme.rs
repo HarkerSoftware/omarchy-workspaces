@@ -11,6 +11,8 @@ const FALLBACK: Palette = Palette {
     foreground: "#a9b1d6",
     accent: "#7aa2f7",
     danger: "#f7768e",
+    viewing: "#9ece6a",
+    open: "#e0af68",
 };
 
 struct Palette {
@@ -18,6 +20,10 @@ struct Palette {
     foreground: &'static str,
     accent: &'static str,
     danger: &'static str,
+    /// Ring for the project workspace currently on screen (ANSI green).
+    viewing: &'static str,
+    /// Ring for a project with windows that is not on screen (ANSI yellow).
+    open: &'static str,
 }
 
 /// The `~/.config/omarchy/current` directory (watched for theme switches).
@@ -48,11 +54,15 @@ pub fn color_definitions() -> String {
     let foreground = get("foreground", FALLBACK.foreground);
     let accent = get("accent", FALLBACK.accent);
     let danger = get("color1", FALLBACK.danger);
+    let viewing = get("color2", FALLBACK.viewing);
+    let open = get("color3", FALLBACK.open);
     format!(
         "@define-color panel_bg {background};\n\
          @define-color panel_fg {foreground};\n\
          @define-color panel_accent {accent};\n\
-         @define-color panel_danger {danger};\n"
+         @define-color panel_danger {danger};\n\
+         @define-color panel_viewing {viewing};\n\
+         @define-color panel_open {open};\n"
     )
 }
 
@@ -71,7 +81,14 @@ mod tests {
     fn fallback_definitions_are_valid_css() {
         // Even with no theme present the definitions must contain all names.
         let css = color_definitions();
-        for name in ["panel_bg", "panel_fg", "panel_accent", "panel_danger"] {
+        for name in [
+            "panel_bg",
+            "panel_fg",
+            "panel_accent",
+            "panel_danger",
+            "panel_viewing",
+            "panel_open",
+        ] {
             assert!(css.contains(name), "{css}");
         }
     }

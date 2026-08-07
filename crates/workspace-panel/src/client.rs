@@ -5,6 +5,7 @@
 //! client re-fetches the full snapshot and pushes the project list to the UI.
 //! Events are only a trigger, which makes reconnects trivially correct.
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 
@@ -21,6 +22,10 @@ pub enum UiUpdate {
     Projects(Vec<ProjectSummary>),
     /// The daemon is unreachable.
     Disconnected,
+    /// Reply to `Get`: the full project definition as JSON.
+    ProjectDetails(serde_json::Value),
+    /// Reply to `Capture`: freshly detected app slots as JSON.
+    CaptureResult(serde_json::Value),
 }
 
 /// Messages from the UI to the connection thread.
@@ -43,6 +48,28 @@ pub enum UiRequest {
     Save(String),
     /// Restore the project (adopt + launch missing).
     Restore(String),
+    /// Close the project: gracefully close all of its windows.
+    Close(String),
+    /// Reorder projects to this exact slug order.
+    Reorder(Vec<String>),
+    /// Fetch a project's full definition (replied as `ProjectDetails`).
+    Get(String),
+    /// Preview auto-detected launch settings (replied as `CaptureResult`).
+    Capture(String),
+    /// Update one slot's launch settings.
+    UpdateSlot {
+        /// Exact project slug.
+        slug: String,
+        /// Slot UUID as a string.
+        slot_id: String,
+        /// Full launch command line ("" clears).
+        command: String,
+        /// Working directory ("" clears).
+        workdir: String,
+        /// Browser profile directory ("" clears); `None` when the field
+        /// does not apply to this slot.
+        profile: Option<String>,
+    },
 }
 
 /// Spawn the connection thread. Returns the channel endpoints for the UI.
@@ -122,14 +149,17 @@ async fn connection(
         &mut writer,
         next_id,
         Request::Subscribe {
-            topics: Some(vec!["projects".into(), "daemon".into()]),
+            // `windows` feeds the open/viewing indicators (window counts
+            // change on open/close/move without any project event).
+            topics: Some(vec!["projects".into(), "daemon".into(), "windows".into()]),
         },
     )
     .await?;
     next_id += 1;
     send(&mut writer, next_id, Request::StateSnapshot).await?;
-    // Id of the snapshot request we are waiting for, if any.
-    let mut pending_snapshot: Option<u64> = Some(next_id);
+    // Requests whose replies the UI cares about, by request id.
+    let mut pending: std::collections::HashMap<u64, Pending> = HashMap::new();
+    pending.insert(next_id, Pending::Snapshot);
     next_id += 1;
 
     loop {
@@ -146,6 +176,27 @@ async fn connection(
                         project: Some(slug),
                         dry_run: false,
                     },
+                    UiRequest::Close(slug) => Request::ProjectClose {
+                        project: Some(slug),
+                    },
+                    UiRequest::Reorder(order) => Request::ProjectReorder { order },
+                    UiRequest::Get(slug) => {
+                        pending.insert(next_id, Pending::Details);
+                        Request::ProjectGet { project: slug }
+                    }
+                    UiRequest::Capture(slug) => {
+                        pending.insert(next_id, Pending::Capture);
+                        Request::ProjectCapture { project: Some(slug) }
+                    }
+                    UiRequest::UpdateSlot { slug, slot_id, command, workdir, profile } => {
+                        Request::SlotUpdate {
+                            project: slug,
+                            slot_id,
+                            command: Some(command),
+                            workdir: Some(workdir),
+                            profile,
+                        }
+                    }
                 };
                 send(&mut writer, next_id, request).await?;
                 next_id += 1;
@@ -156,26 +207,39 @@ async fn connection(
                 };
                 match serde_json::from_str::<ServerMessage>(&line) {
                     Ok(ServerMessage::Response(response)) => {
-                        if pending_snapshot == Some(response.id)
-                            && let Some(result) = response.result
-                        {
-                            pending_snapshot = None;
-                            if let Ok(snapshot) = serde_json::from_value::<Snapshot>(result)
-                                && updates
-                                    .send(UiUpdate::Projects(snapshot.projects))
-                                    .await
-                                    .is_err()
-                            {
-                                return Ok(());
+                        let Some(kind) = pending.remove(&response.id) else { continue };
+                        let Some(result) = response.result else {
+                            if let Some(error) = response.error {
+                                tracing::warn!(?error, "daemon rejected a panel request");
                             }
+                            continue;
+                        };
+                        let update = match kind {
+                            Pending::Snapshot => {
+                                match serde_json::from_value::<Snapshot>(result) {
+                                    Ok(snapshot) => UiUpdate::Projects(snapshot.projects),
+                                    Err(_) => continue,
+                                }
+                            }
+                            Pending::Details => UiUpdate::ProjectDetails(result),
+                            Pending::Capture => UiUpdate::CaptureResult(result),
+                        };
+                        if updates.send(update).await.is_err() {
+                            return Ok(());
                         }
                     }
-                    Ok(ServerMessage::Event(_)) => {
-                        // Any pushed event on our topics may change the list;
-                        // refetch unless one is already in flight.
-                        if pending_snapshot.is_none() {
+                    Ok(ServerMessage::Event(event)) => {
+                        // Title and focus churn constantly and never change
+                        // the list or the indicators — skip those; refetch
+                        // for the rest unless a fetch is already in flight.
+                        let noisy = matches!(
+                            event.data,
+                            workspace_core::DomainEvent::WindowTitleChanged { .. }
+                                | workspace_core::DomainEvent::WindowFocused { .. }
+                        );
+                        if !noisy && !pending.values().any(|p| matches!(p, Pending::Snapshot)) {
                             send(&mut writer, next_id, Request::StateSnapshot).await?;
-                            pending_snapshot = Some(next_id);
+                            pending.insert(next_id, Pending::Snapshot);
                             next_id += 1;
                         }
                     }
@@ -186,4 +250,11 @@ async fn connection(
             }
         }
     }
+}
+
+/// What the UI expects back for an in-flight request id.
+enum Pending {
+    Snapshot,
+    Details,
+    Capture,
 }

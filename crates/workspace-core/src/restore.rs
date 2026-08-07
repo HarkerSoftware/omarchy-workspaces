@@ -132,6 +132,10 @@ pub struct AdoptStep {
     pub slot_id: Uuid,
     /// Display label.
     pub label: String,
+    /// The slot's identity (the layout pass groups interchangeable windows
+    /// by it).
+    #[serde(default)]
+    pub identity: WindowIdentity,
     /// The live window's address.
     pub address: String,
     /// Whether the window must move to the project workspace.
@@ -165,6 +169,23 @@ impl RestorePlan {
     }
 }
 
+/// A slot saved without an explicit launch spec (older project files, or a
+/// capture where `/proc` was unreadable) falls back to re-running its
+/// identity executable, so restore can still relaunch it after a reboot.
+fn fallback_launch(identity: &WindowIdentity) -> Option<crate::model::LaunchSpec> {
+    let executable = identity.executable.as_ref()?.to_string_lossy();
+    // The command reaches the shell unquoted; keep a spaced path one word.
+    let command = if executable.chars().any(char::is_whitespace) {
+        format!("'{}'", executable.replace('\'', r"'\''"))
+    } else {
+        executable.into_owned()
+    };
+    Some(crate::model::LaunchSpec {
+        command,
+        ..Default::default()
+    })
+}
+
 /// Errors from restore planning.
 #[derive(Debug, thiserror::Error)]
 pub enum PlanError {
@@ -194,6 +215,7 @@ pub fn plan(
             Some(AdoptStep {
                 slot_id: *slot_id,
                 label: slot.label(),
+                identity: slot.identity.clone(),
                 address: address.clone(),
                 needs_move: window.facts.workspace != workspace,
                 placement: slot.placement.clone(),
@@ -217,7 +239,10 @@ pub fn plan(
             wave.into_iter()
                 .filter_map(|slot_id| {
                     let slot = missing_slots.iter().find(|s| s.slot_id == slot_id)?;
-                    let spec = slot.launch.clone()?;
+                    let spec = slot
+                        .launch
+                        .clone()
+                        .or_else(|| fallback_launch(&slot.identity))?;
                     Some(LaunchStep {
                         slot_id,
                         label: slot.label(),
@@ -331,6 +356,23 @@ mod tests {
         let r = reconcile(&p, &[&w]);
         assert_eq!(r.matched.len(), 1);
         assert_eq!(r.missing.len(), 1);
+    }
+
+    #[test]
+    fn slots_without_launch_fall_back_to_identity_executable() {
+        let mut captured = slot("editor", "code", &[]);
+        captured.launch = None;
+        captured.identity.executable = Some("/usr/share/code/code".into());
+        let p = project(vec![captured]);
+        let planned = plan(&p, &[], "").unwrap();
+        assert_eq!(planned.launch_count(), 1);
+        assert_eq!(planned.waves[0][0].spec.command, "/usr/share/code/code");
+
+        // No launch spec and no executable: nothing to run, slot is skipped.
+        let mut unknown = slot("mystery", "x", &[]);
+        unknown.launch = None;
+        let p = project(vec![unknown]);
+        assert_eq!(plan(&p, &[], "").unwrap().launch_count(), 0);
     }
 
     #[test]

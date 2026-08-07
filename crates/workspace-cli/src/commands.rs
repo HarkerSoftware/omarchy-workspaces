@@ -77,7 +77,36 @@ pub async fn rename(socket: Option<PathBuf>, slug: String, name: String) -> u8 {
 }
 
 /// `workspace switch <query>` (fuzzy).
-pub async fn switch(socket: Option<PathBuf>, query: String) -> u8 {
+pub async fn switch(socket: Option<PathBuf>, query: String, index: bool) -> u8 {
+    let query = if index {
+        // `--index N`: the 1-based position in the panel order.
+        let position: usize = match query.parse() {
+            Ok(position) if position >= 1 => position,
+            _ => {
+                eprintln!("error: --index takes a 1-based number, got '{query}'");
+                return 2;
+            }
+        };
+        match one_request(socket.clone(), Request::ProjectList).await {
+            Ok(result) => {
+                let projects: Vec<ProjectSummary> =
+                    serde_json::from_value(result).unwrap_or_default();
+                match projects.get(position - 1) {
+                    Some(project) => project.slug.as_str().to_owned(),
+                    None => {
+                        eprintln!(
+                            "error: no project at position {position} (there are {})",
+                            projects.len()
+                        );
+                        return 1;
+                    }
+                }
+            }
+            Err(code) => return code,
+        }
+    } else {
+        query
+    };
     match one_request(socket, Request::ProjectSwitch { project: query }).await {
         Ok(result) => {
             if let Ok(summary) = serde_json::from_value::<ProjectSummary>(result) {
@@ -163,6 +192,26 @@ pub async fn save(socket: Option<PathBuf>, project: Option<String>) -> u8 {
                 result["saved"].as_str().unwrap_or("?"),
                 result["slots"].as_u64().unwrap_or(0),
                 if result["slots"].as_u64() == Some(1) {
+                    ""
+                } else {
+                    "s"
+                }
+            );
+            0
+        }
+        Err(code) => code,
+    }
+}
+
+/// `workspace close [project]` — gracefully close all of a project's windows.
+pub async fn close(socket: Option<PathBuf>, project: Option<String>) -> u8 {
+    match one_request(socket, Request::ProjectClose { project }).await {
+        Ok(result) => {
+            println!(
+                "closed '{}' ({} window{})",
+                result["closed"].as_str().unwrap_or("?"),
+                result["windows"].as_u64().unwrap_or(0),
+                if result["windows"].as_u64() == Some(1) {
                     ""
                 } else {
                     "s"

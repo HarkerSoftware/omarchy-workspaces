@@ -70,6 +70,16 @@ pub enum Command {
     },
     /// Persist the runtime snapshot now (autosave debounce fires this).
     Persist,
+    /// A save/capture request together with freshly fetched client state
+    /// (geometry is refreshed before capturing).
+    RequestWithGeometry {
+        /// Fresh Hyprland clients (empty when the fetch failed).
+        clients: Vec<workspace_hypr::Client>,
+        /// The request to answer.
+        request: Request,
+        /// Where to send the outcome.
+        resp: oneshot::Sender<RequestResult>,
+    },
     /// A restore run correlated a window to a slot; record the assignment
     /// and apply the slot's placement.
     CorrelateRestore {
@@ -147,10 +157,17 @@ pub fn spawn(
     };
     let (projects, recovery) = match &state_dir {
         Some(dir) => {
-            let (projects, errors) = workspace_storage::projects::load_projects(dir);
+            let (mut projects, errors) = workspace_storage::projects::load_projects(dir);
             for error in &errors {
                 tracing::error!(%error, "skipping unreadable project file");
             }
+            // The panel shows projects in this order; position is the
+            // user's manual ordering (legacy files all tie at 0 → by slug).
+            projects.sort_by(|a, b| {
+                a.position
+                    .cmp(&b.position)
+                    .then_with(|| a.slug.as_str().cmp(b.slug.as_str()))
+            });
             let runtime = workspace_storage::runtime::load_runtime(dir);
             tracing::info!(
                 projects = projects.len(),
@@ -173,6 +190,7 @@ pub fn spawn(
         state_dir,
         self_tx: cmd_tx.clone(),
         hydrated_once: false,
+        restoring: Default::default(),
         started: Instant::now(),
         seq: 0,
         bus: bus_tx.clone(),
@@ -211,6 +229,9 @@ struct StateActor {
     self_tx: mpsc::Sender<Command>,
     /// Whether the first hydration has happened (gates restore_on_boot).
     hydrated_once: bool,
+    /// Slugs with a restore run in flight (guards double-restores; cleared
+    /// by the run's `RestoreFinished` event).
+    restoring: std::collections::HashSet<String>,
     started: Instant,
     seq: u64,
     bus: broadcast::Sender<Arc<EventEnvelope>>,
@@ -271,25 +292,38 @@ impl StateActor {
                 self.apply_rules(&address);
                 self.sync_inherited_assignment(&address);
             }
-            Command::Request { request, resp } => match self.handle_request(request) {
-                Outcome::Reply(result) => {
-                    let _ = resp.send(result);
-                }
-                Outcome::DispatchThen { dispatches, result } => {
+            Command::Request { request, resp } => {
+                // Save/capture record window geometry, but Hyprland emits no
+                // events for tiled rearrangement, so the world's copy can be
+                // stale. Fetch fresh clients first, then run the request.
+                if matches!(
+                    request,
+                    Request::ProjectSave { .. } | Request::ProjectCapture { .. }
+                ) {
                     let ctl = self.ctl.clone();
+                    let tx = self.self_tx.clone();
                     tokio::spawn(async move {
-                        let outcome = match ctl.dispatch_batch(&dispatches).await {
-                            Ok(()) => Ok(result),
-                            Err(error) => Err(ErrorBody {
-                                code: error_code::HYPRLAND.to_owned(),
-                                message: error.to_string(),
-                                data: None,
-                            }),
-                        };
-                        let _ = resp.send(outcome);
+                        let clients = ctl.clients().await.unwrap_or_default();
+                        let _ = tx
+                            .send(Command::RequestWithGeometry {
+                                clients,
+                                request,
+                                resp,
+                            })
+                            .await;
                     });
+                } else {
+                    self.answer_request(request, resp);
                 }
-            },
+            }
+            Command::RequestWithGeometry {
+                clients,
+                request,
+                resp,
+            } => {
+                self.refresh_geometry(&clients);
+                self.answer_request(request, resp);
+            }
             Command::Persist => {
                 self.persist_runtime();
             }
@@ -305,20 +339,39 @@ impl StateActor {
                     .find(|p| p.id == project_id)
                     .and_then(|p| p.apps.iter().find(|s| s.slot_id == slot_id))
                     .map(|s| s.placement.clone());
+                let workspace = self
+                    .projects
+                    .iter()
+                    .find(|p| p.id == project_id)
+                    .map(|p| self.ws_name(&p.slug));
                 if let Some(window) = self.world.windows.get_mut(&address) {
                     window.assignment = Some((project_id, group));
                     window.assigned_by = Some(AssignmentSource::Restore(slot_id));
+                    let mut dispatches = Vec::new();
+                    // Single-process apps (VS Code, chromium) open their new
+                    // window from the existing process, so the exec rule's
+                    // workspace never applied — bring the window home.
+                    if let Some(workspace) = workspace
+                        && window.facts.workspace != workspace
+                    {
+                        dispatches.push(Dispatch::MoveToWorkspaceSilent {
+                            target: WsTarget::Name(workspace),
+                            address: workspace_hypr::WindowAddress::new(&address),
+                        });
+                    }
                     self.persist_runtime();
-                    // Apply floating placement off the actor loop.
                     if let Some(placement) = placement
                         && placement.floating
                     {
+                        dispatches
+                            .extend(crate::launcher::placement_dispatches(&address, &placement));
+                    }
+                    // Apply off the actor loop.
+                    if !dispatches.is_empty() {
                         let ctl = self.ctl.clone();
-                        let dispatches =
-                            crate::launcher::placement_dispatches(&address, &placement);
                         tokio::spawn(async move {
                             if let Err(error) = ctl.dispatch_batch(&dispatches).await {
-                                tracing::warn!(%error, "placement dispatches failed");
+                                tracing::warn!(%error, "correlation dispatches failed");
                             }
                         });
                     }
@@ -328,6 +381,7 @@ impl StateActor {
                 // Restore step (e) of the plan: once a restore run completes,
                 // park the members of groups that are marked hidden.
                 if let DomainEvent::RestoreFinished { project, .. } = &event {
+                    self.restoring.remove(project);
                     self.park_hidden_groups(project.clone());
                 }
                 self.emit(event);
@@ -478,6 +532,47 @@ impl StateActor {
         }
     }
 
+    /// Run a request through the handler and deliver the outcome.
+    fn answer_request(&mut self, request: Request, resp: oneshot::Sender<RequestResult>) {
+        match self.handle_request(request) {
+            Outcome::Reply(result) => {
+                let _ = resp.send(result);
+            }
+            Outcome::DispatchThen { dispatches, result } => {
+                let ctl = self.ctl.clone();
+                tokio::spawn(async move {
+                    let outcome = match ctl.dispatch_batch(&dispatches).await {
+                        Ok(()) => Ok(result),
+                        Err(error) => Err(ErrorBody {
+                            code: error_code::HYPRLAND.to_owned(),
+                            message: error.to_string(),
+                            data: None,
+                        }),
+                    };
+                    let _ = resp.send(outcome);
+                });
+            }
+        }
+    }
+
+    /// Overwrite tracked geometry (and workspace) with fresh client state.
+    /// Only known windows are touched; membership is untouched.
+    fn refresh_geometry(&mut self, clients: &[workspace_hypr::Client]) {
+        for client in clients {
+            let Some(window) = self.world.windows.get_mut(client.address.as_str()) else {
+                continue;
+            };
+            window.facts.at = client.at;
+            window.facts.size = client.size;
+            window.facts.floating = client.floating;
+            window.facts.fullscreen = client.fullscreen;
+            window.facts.monitor = client.monitor;
+            window.facts.workspace = client.workspace.name.clone();
+            window.facts.workspace_id = client.workspace.id;
+            window.facts.title = client.title.clone();
+        }
+    }
+
     /// Keep membership in sync with the window's workspace for windows the
     /// user placed there implicitly: a window on a project (or group parking)
     /// workspace joins that project with an `Inherited` assignment; moving an
@@ -598,6 +693,17 @@ impl StateActor {
             Request::ProjectDelete { slug } => self.project_delete(&slug),
             Request::ProjectRename { slug, name } => self.project_rename(&slug, name),
             Request::ProjectSwitch { project } => self.project_switch(&project),
+            Request::ProjectClose { project } => self.project_close(project),
+            Request::ProjectGet { project } => self.project_get(&project),
+            Request::ProjectReorder { order } => self.project_reorder(&order),
+            Request::ProjectCapture { project } => self.project_capture(project),
+            Request::SlotUpdate {
+                project,
+                slot_id,
+                command,
+                workdir,
+                profile,
+            } => self.slot_update(&project, &slot_id, command, workdir, profile),
             Request::ProjectList => {
                 let list: Vec<ProjectSummary> =
                     self.projects.iter().map(|p| self.summary(p)).collect();
@@ -743,6 +849,43 @@ impl StateActor {
         }
     }
 
+    /// Capture the windows on the project's workspaces as declarative app
+    /// slots (shared by `project.save` and the `project.capture` preview).
+    fn capture_apps(&self, slug: &Slug, project_name: &str) -> Vec<workspace_core::model::AppSlot> {
+        let monitor_names: std::collections::HashMap<i64, String> = self
+            .world
+            .monitors
+            .iter()
+            .map(|m| (m.id, m.name.clone()))
+            .collect();
+        self.world
+            .windows
+            .values()
+            .filter(|w| self.on_project_workspace(slug, &w.facts.workspace))
+            .map(|w| workspace_core::model::AppSlot {
+                slot_id: uuid::Uuid::new_v4(),
+                name: None,
+                launch: crate::capture::captured_launch(&w.facts, project_name),
+                identity: workspace_core::model::WindowIdentity {
+                    class: Some(w.facts.class.clone()),
+                    initial_class: Some(w.facts.initial_class.clone()),
+                    executable: w.facts.executable.clone(),
+                    title_pattern: crate::capture::captured_title_pattern(&w.facts),
+                },
+                group: w.assignment.as_ref().and_then(|(_, g)| g.clone()),
+                placement: workspace_core::model::Placement {
+                    floating: w.facts.floating,
+                    // Geometry is captured for tiled windows too: restore
+                    // uses it to swap windows back into their arrangement.
+                    position: Some(w.facts.at),
+                    size: Some(w.facts.size),
+                    fullscreen: w.facts.fullscreen,
+                    monitor: monitor_names.get(&w.facts.monitor).cloned(),
+                },
+            })
+            .collect()
+    }
+
     /// `project.save`: capture the project's currently assigned windows as
     /// declarative app slots and persist the file.
     fn project_save(&mut self, query: Option<String>) -> Outcome {
@@ -760,41 +903,11 @@ impl StateActor {
                 }
             },
         };
-        let monitor_names: std::collections::HashMap<i64, String> = self
-            .world
-            .monitors
-            .iter()
-            .map(|m| (m.id, m.name.clone()))
-            .collect();
-        let apps: Vec<workspace_core::model::AppSlot> = self
-            .world
-            .windows
-            .values()
-            .filter(|w| {
-                w.assignment
-                    .as_ref()
-                    .is_some_and(|(id, _)| *id == project_id)
-            })
-            .map(|w| workspace_core::model::AppSlot {
-                slot_id: uuid::Uuid::new_v4(),
-                name: None,
-                launch: None,
-                identity: workspace_core::model::WindowIdentity {
-                    class: Some(w.facts.class.clone()),
-                    initial_class: Some(w.facts.initial_class.clone()),
-                    executable: w.facts.executable.clone(),
-                    title_pattern: None,
-                },
-                group: w.assignment.as_ref().and_then(|(_, g)| g.clone()),
-                placement: workspace_core::model::Placement {
-                    floating: w.facts.floating,
-                    position: w.facts.floating.then_some(w.facts.at),
-                    size: w.facts.floating.then_some(w.facts.size),
-                    fullscreen: w.facts.fullscreen,
-                    monitor: monitor_names.get(&w.facts.monitor).cloned(),
-                },
-            })
-            .collect();
+        let (project_slug, project_name) = match self.projects.iter().find(|p| p.id == project_id) {
+            Some(project) => (project.slug.clone(), project.name.clone()),
+            None => return Outcome::Reply(Err(not_found("project vanished".to_owned()))),
+        };
+        let apps = self.capture_apps(&project_slug, &project_name);
         let Some(project) = self.projects.iter_mut().find(|p| p.id == project_id) else {
             return Outcome::Reply(Err(not_found("project vanished".to_owned())));
         };
@@ -831,14 +944,16 @@ impl StateActor {
                 }
             }
         };
+        // Adoption only considers windows physically on the project's
+        // workspaces. Class/executable identities cannot tell two VS Code or
+        // chromium windows apart, so a session-wide pool would steal
+        // look-alike windows from other workspaces; anything missing here is
+        // launched fresh instead.
         let candidates: Vec<&TrackedWindow> = self
             .world
             .windows
             .values()
-            .filter(|w| match &w.assignment {
-                None => true,
-                Some((id, _)) => *id == project.id,
-            })
+            .filter(|w| self.on_project_workspace(&project.slug, &w.facts.workspace))
             .collect();
         let plan = match workspace_core::restore::plan(
             &project,
@@ -850,6 +965,12 @@ impl StateActor {
         };
         if dry_run {
             return Outcome::Reply(Ok(json(&plan)));
+        }
+        if !self.restoring.insert(project.slug.as_str().to_owned()) {
+            return Outcome::Reply(Err(conflict(format!(
+                "a restore of '{}' is already running",
+                project.slug
+            ))));
         }
         let result = serde_json::json!({ "started": true, "plan": json(&plan) });
         let ctx = crate::launcher::RestoreContext {
@@ -912,6 +1033,7 @@ impl StateActor {
         copy.id = workspace_core::model::ProjectId::new();
         copy.slug = slug.clone();
         copy.name = name.clone();
+        copy.position = self.next_position();
         for slot in &mut copy.apps {
             slot.slot_id = uuid::Uuid::new_v4();
         }
@@ -988,6 +1110,7 @@ impl StateActor {
             }
             None => {}
         }
+        project.position = self.next_position();
         let summary = self.summary(&project);
         self.persist_project(&project);
         let slug = project.slug.as_str().to_owned();
@@ -1525,6 +1648,7 @@ impl StateActor {
             groups: Vec::new(),
             apps: Vec::new(),
             monitor: None,
+            position: self.next_position(),
         };
         let summary = self.summary(&project);
         self.persist_project(&project);
@@ -1611,8 +1735,192 @@ impl StateActor {
             .iter()
             .find(|p| p.id == project_id)
             .expect("resolved above");
+
+        // Switching to a closed project (saved apps, no windows) reopens it:
+        // the switch focuses the empty workspace immediately and a restore
+        // starts in the background, exactly as if Restore had been clicked.
+        let closed = !project.apps.is_empty()
+            && !self
+                .world
+                .windows
+                .values()
+                .any(|w| self.on_project_workspace(&project.slug, &w.facts.workspace));
+        if closed && !self.restoring.contains(project.slug.as_str()) {
+            tracing::info!(project = %project.slug, "switch to closed project; restoring");
+            let commands = self.self_tx.clone();
+            let restore_slug = project.slug.as_str().to_owned();
+            tokio::spawn(async move {
+                let (tx, rx) = oneshot::channel();
+                let _ = commands
+                    .send(Command::Request {
+                        request: Request::ProjectRestore {
+                            project: Some(restore_slug.clone()),
+                            dry_run: false,
+                        },
+                        resp: tx,
+                    })
+                    .await;
+                if let Ok(Err(error)) = rx.await {
+                    tracing::warn!(project = %restore_slug, error = %error.message, "auto-restore on switch failed");
+                }
+            });
+        }
+
         let result = json(&self.summary(project));
         Outcome::DispatchThen { dispatches, result }
+    }
+
+    /// `project.close`: gracefully close every window assigned to the project.
+    /// When it was the active project, focus returns to the previous workspace.
+    fn project_close(&mut self, query: Option<String>) -> Outcome {
+        let (project_id, slug) = match query {
+            Some(query) => match self.resolve(&query) {
+                Ok(project) => (project.id, project.slug.clone()),
+                Err(error) => return Outcome::Reply(Err(error)),
+            },
+            None => match self.world.active_project {
+                Some(id) => match self.projects.iter().find(|p| p.id == id) {
+                    Some(project) => (project.id, project.slug.clone()),
+                    None => return Outcome::Reply(Err(not_found("project vanished".to_owned()))),
+                },
+                None => {
+                    return Outcome::Reply(Err(bad_request(
+                        "no project given and none is active".to_owned(),
+                    )));
+                }
+            },
+        };
+        let addresses: Vec<String> = self
+            .world
+            .windows
+            .values()
+            .filter(|w| self.on_project_workspace(&slug, &w.facts.workspace))
+            .map(|w| w.address.clone())
+            .collect();
+        let mut dispatches: Vec<Dispatch> = addresses
+            .iter()
+            .map(|address| Dispatch::CloseWindow(workspace_hypr::WindowAddress::new(address)))
+            .collect();
+        if self.world.active_project == Some(project_id) {
+            dispatches.push(Dispatch::Workspace(WsTarget::Previous));
+            self.world.active_project = None;
+            self.emit(DomainEvent::ProjectSwitched { slug: None });
+        }
+        self.persist_runtime();
+        self.emit(DomainEvent::ProjectClosed {
+            slug: slug.as_str().to_owned(),
+            windows: addresses.len(),
+        });
+        Outcome::DispatchThen {
+            dispatches,
+            result: serde_json::json!({ "closed": slug, "windows": addresses.len() }),
+        }
+    }
+
+    /// `project.get`: the full project definition, launch specs included.
+    fn project_get(&self, query: &str) -> Outcome {
+        match self.resolve(query) {
+            Ok(project) => Outcome::Reply(Ok(json(project))),
+            Err(error) => Outcome::Reply(Err(error)),
+        }
+    }
+
+    /// `project.capture`: preview what `project.save` would capture from the
+    /// currently assigned windows, without touching the project file.
+    fn project_capture(&self, query: Option<String>) -> Outcome {
+        let project = match query {
+            Some(query) => match self.resolve(&query) {
+                Ok(project) => project,
+                Err(error) => return Outcome::Reply(Err(error)),
+            },
+            None => match self
+                .world
+                .active_project
+                .and_then(|id| self.projects.iter().find(|p| p.id == id))
+            {
+                Some(project) => project,
+                None => {
+                    return Outcome::Reply(Err(bad_request(
+                        "no project given and none is active".to_owned(),
+                    )));
+                }
+            },
+        };
+        let apps = self.capture_apps(&project.slug, &project.name);
+        Outcome::Reply(Ok(serde_json::json!({
+            "project": project.slug,
+            "apps": json(&apps),
+        })))
+    }
+
+    /// `slot.update`: edit one slot's launch settings. `None` fields stay
+    /// unchanged; empty strings clear. The profile is kept as a
+    /// `--profile-directory=` argument so it composes with any command.
+    fn slot_update(
+        &mut self,
+        query: &str,
+        slot_id: &str,
+        command: Option<String>,
+        workdir: Option<String>,
+        profile: Option<String>,
+    ) -> Outcome {
+        let slot_uuid = match uuid::Uuid::parse_str(slot_id) {
+            Ok(id) => id,
+            Err(error) => {
+                return Outcome::Reply(Err(bad_request(format!("bad slot id: {error}"))));
+            }
+        };
+        let project_id = match self.resolve(query) {
+            Ok(project) => project.id,
+            Err(error) => return Outcome::Reply(Err(error)),
+        };
+        let project = self
+            .projects
+            .iter_mut()
+            .find(|p| p.id == project_id)
+            .expect("resolved above");
+        let Some(slot) = project.apps.iter_mut().find(|s| s.slot_id == slot_uuid) else {
+            return Outcome::Reply(Err(not_found(format!(
+                "project '{}' has no slot {slot_id}",
+                project.slug
+            ))));
+        };
+
+        let mut spec = slot.launch.clone().unwrap_or_default();
+        // A slot saved without a launch spec restores via its identity
+        // executable; seed the command from it so a workdir/profile-only
+        // edit produces a complete, persistable spec.
+        if spec.command.is_empty()
+            && let Some(executable) = &slot.identity.executable
+        {
+            spec.command = executable.to_string_lossy().into_owned();
+        }
+        if let Some(command) = command {
+            // The command is the whole editable line; old positional args
+            // would duplicate into it, so only the managed profile survives.
+            spec.command = command.trim().to_owned();
+            spec.args.retain(|a| a.starts_with("--profile-directory"));
+        }
+        if let Some(workdir) = workdir {
+            let workdir = workdir.trim();
+            spec.workdir = (!workdir.is_empty()).then(|| workdir.to_owned());
+        }
+        if let Some(profile) = profile {
+            let profile = profile.trim();
+            spec.args.retain(|a| !a.starts_with("--profile-directory"));
+            if !profile.is_empty() {
+                spec.args.push(format!("--profile-directory={profile}"));
+            }
+        }
+        slot.launch = (!spec.command.is_empty()).then_some(spec);
+
+        let updated = slot.clone();
+        let saved = project.clone();
+        self.persist_project(&saved);
+        Outcome::Reply(Ok(serde_json::json!({
+            "project": saved.slug,
+            "slot": json(&updated),
+        })))
     }
 
     fn window_assign(&mut self, address: &str, query: &str, group: Option<String>) -> Outcome {
@@ -1679,8 +1987,83 @@ impl StateActor {
         }
     }
 
+    /// Sort position for a newly added project: after everything else.
+    fn next_position(&self) -> u32 {
+        self.projects
+            .iter()
+            .map(|p| p.position)
+            .max()
+            .map_or(0, |max| max + 1)
+    }
+
+    /// `project.reorder`: the given slugs take positions 0.. in order;
+    /// unlisted projects keep their relative order after them. Every
+    /// project whose position changes is re-persisted.
+    fn project_reorder(&mut self, order: &[String]) -> Outcome {
+        for slug in order {
+            if !self.projects.iter().any(|p| p.slug.as_str() == slug) {
+                return Outcome::Reply(Err(not_found(format!("no project with slug '{slug}'"))));
+            }
+        }
+        let mut position = 0u32;
+        let mut changed: Vec<Project> = Vec::new();
+        for slug in order {
+            let project = self
+                .projects
+                .iter_mut()
+                .find(|p| p.slug.as_str() == slug)
+                .expect("checked above");
+            if project.position != position {
+                project.position = position;
+                changed.push(project.clone());
+            }
+            position += 1;
+        }
+        // Unlisted projects: keep their relative order, after the listed.
+        let mut rest: Vec<usize> = (0..self.projects.len())
+            .filter(|i| !order.iter().any(|s| s == self.projects[*i].slug.as_str()))
+            .collect();
+        rest.sort_by_key(|i| self.projects[*i].position);
+        for index in rest {
+            if self.projects[index].position != position {
+                self.projects[index].position = position;
+                changed.push(self.projects[index].clone());
+            }
+            position += 1;
+        }
+        self.projects.sort_by(|a, b| {
+            a.position
+                .cmp(&b.position)
+                .then_with(|| a.slug.as_str().cmp(b.slug.as_str()))
+        });
+        for project in &changed {
+            self.persist_project(project);
+        }
+        let full_order: Vec<String> = self
+            .projects
+            .iter()
+            .map(|p| p.slug.as_str().to_owned())
+            .collect();
+        self.emit(DomainEvent::ProjectsReordered {
+            order: full_order.clone(),
+        });
+        Outcome::Reply(Ok(serde_json::json!({ "order": full_order })))
+    }
+
     fn ws_name(&self, slug: &Slug) -> String {
         ws_names::project_workspace(&self.config.general.workspace_prefix, slug)
+    }
+
+    /// Whether a workspace name is one of the project's workspaces (the
+    /// primary one or a group parking workspace). This — physical membership,
+    /// not the assignment map — is what "the project's windows" means for
+    /// save, close, restore adoption, and the panel's window count.
+    fn on_project_workspace(&self, slug: &Slug, workspace: &str) -> bool {
+        match ws_names::parse(&self.config.general.workspace_prefix, workspace) {
+            ws_names::ParsedName::Project(project) => project == *slug,
+            ws_names::ParsedName::Group { project, .. } => project == *slug,
+            ws_names::ParsedName::Foreign => false,
+        }
     }
 
     fn summary(&self, project: &Project) -> ProjectSummary {
@@ -1692,11 +2075,7 @@ impl StateActor {
                 .world
                 .windows
                 .values()
-                .filter(|w| {
-                    w.assignment
-                        .as_ref()
-                        .is_some_and(|(id, _)| *id == project.id)
-                })
+                .filter(|w| self.on_project_workspace(&project.slug, &w.facts.workspace))
                 .count(),
             groups: project.groups.iter().map(|g| g.slug.clone()).collect(),
             workspace: self.ws_name(&project.slug),

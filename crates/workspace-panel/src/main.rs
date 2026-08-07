@@ -6,6 +6,7 @@
 //! collapsed width. Colors follow the current Omarchy theme live.
 
 mod client;
+mod settings;
 mod theme;
 
 use std::cell::{Cell, RefCell};
@@ -37,6 +38,9 @@ struct Ui {
     expanded: Cell<bool>,
     revealers: RefCell<Vec<gtk::Revealer>>,
     hover_timer: RefCell<Option<glib::SourceId>>,
+    /// A row drag is in flight: normal pointer crossing events are
+    /// suppressed by GTK, so hover state must not collapse the rail.
+    drag_active: Cell<bool>,
 }
 
 impl Ui {
@@ -51,6 +55,19 @@ impl Ui {
         for revealer in self.revealers.borrow().iter() {
             revealer.set_reveal_child(expanded);
         }
+    }
+
+    /// Collapse after the usual delay (unless a drag is pinning the rail).
+    fn schedule_collapse(self: &Rc<Self>) {
+        self.cancel_timer();
+        let ui = Rc::clone(self);
+        let source = glib::timeout_add_local_once(COLLAPSE_DELAY, move || {
+            ui.hover_timer.borrow_mut().take();
+            if !ui.drag_active.get() {
+                ui.set_expanded(false);
+            }
+        });
+        *self.hover_timer.borrow_mut() = Some(source);
     }
 }
 
@@ -133,17 +150,32 @@ fn build_ui(app: &gtk::Application) {
             *ui.hover_timer.borrow_mut() = Some(source);
         }
     ));
+    // After a drop the pointer may still be inside without a fresh enter
+    // event; any movement re-arms expansion.
+    motion.connect_motion(glib::clone!(
+        #[strong]
+        ui,
+        move |_, _, _| {
+            if !ui.expanded.get() && ui.hover_timer.borrow().is_none() && !ui.drag_active.get() {
+                let ui2 = Rc::clone(&ui);
+                let source = glib::timeout_add_local_once(EXPAND_DELAY, move || {
+                    ui2.hover_timer.borrow_mut().take();
+                    ui2.set_expanded(true);
+                });
+                *ui.hover_timer.borrow_mut() = Some(source);
+            }
+        }
+    ));
     motion.connect_leave(glib::clone!(
         #[strong]
         ui,
         move |_| {
-            ui.cancel_timer();
-            let ui2 = Rc::clone(&ui);
-            let source = glib::timeout_add_local_once(COLLAPSE_DELAY, move || {
-                ui2.hover_timer.borrow_mut().take();
-                ui2.set_expanded(false);
-            });
-            *ui.hover_timer.borrow_mut() = Some(source);
+            // A starting drag delivers a synthetic leave; ignore it — the
+            // drag keeps the rail pinned open until it ends.
+            if ui.drag_active.get() {
+                return;
+            }
+            ui.schedule_collapse();
         }
     ));
     root.add_controller(motion);
@@ -151,6 +183,58 @@ fn build_ui(app: &gtk::Application) {
     window.set_child(Some(&root));
 
     let (updates, requests) = client::spawn(None);
+    let settings_window: settings::Shared = Rc::new(RefCell::new(None));
+    // The daemon-confirmed order, and what the list currently shows —
+    // they diverge only while a drag is shuffling rows live.
+    let row_order: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    let visual_order: Rc<RefCell<Vec<String>>> = Rc::new(RefCell::new(Vec::new()));
+    // Slug being dragged, if a drag is in flight.
+    let drag_state: Rc<RefCell<Option<String>>> = Rc::new(RefCell::new(None));
+    // Handles the per-row drag sources need (begin/cancel bookkeeping).
+    let drag = Rc::new(DragCtx {
+        list: list.clone(),
+        state: Rc::clone(&drag_state),
+        committed: Rc::clone(&row_order),
+        visual: Rc::clone(&visual_order),
+    });
+
+    // Rows shuffle out of the way live while the drag hovers; the drop
+    // commits whatever arrangement is on screen.
+    {
+        let target = gtk::DropTarget::new(glib::types::Type::STRING, gtk::gdk::DragAction::MOVE);
+        {
+            let list = list.clone();
+            let visual_order = Rc::clone(&visual_order);
+            let drag_state = Rc::clone(&drag_state);
+            target.connect_motion(move |_, _x, y| {
+                let dragged = drag_state.borrow().clone();
+                if let Some(slug) = dragged
+                    && let Some(row) = list.row_at_y(y as i32)
+                {
+                    let to = row.index().max(0) as usize;
+                    move_row(&list, &mut visual_order.borrow_mut(), &slug, to);
+                }
+                gtk::gdk::DragAction::MOVE
+            });
+        }
+        {
+            let requests = requests.clone();
+            let row_order = Rc::clone(&row_order);
+            let visual_order = Rc::clone(&visual_order);
+            let drag_state = Rc::clone(&drag_state);
+            target.connect_drop(move |_, value, _x, _y| {
+                if value.get::<String>().is_err() {
+                    return false;
+                }
+                drag_state.borrow_mut().take();
+                let order = visual_order.borrow().clone();
+                *row_order.borrow_mut() = order.clone();
+                let _ = requests.send_blocking(UiRequest::Reorder(order));
+                true
+            });
+        }
+        list.add_controller(target);
+    }
 
     // "+" opens a small popover with a name entry.
     {
@@ -194,13 +278,37 @@ fn build_ui(app: &gtk::Application) {
         root,
         #[strong]
         ui,
+        #[strong]
+        settings_window,
+        #[strong]
+        row_order,
+        #[strong]
+        visual_order,
+        #[strong]
+        drag,
         async move {
             while let Ok(update) = updates.recv().await {
                 match update {
                     UiUpdate::Projects(projects) => {
                         root.remove_css_class("disconnected");
                         status.set_visible(false);
-                        rebuild_rows(&list, &ui, &projects, &requests);
+                        let order: Vec<String> = projects
+                            .iter()
+                            .map(|p| p.slug.as_str().to_owned())
+                            .collect();
+                        *row_order.borrow_mut() = order.clone();
+                        *visual_order.borrow_mut() = order;
+                        rebuild_rows(&list, &ui, &projects, &requests, &settings_window, &drag);
+                    }
+                    UiUpdate::ProjectDetails(project) => {
+                        if let Some(open) = settings_window.borrow().as_ref() {
+                            open.populate(&project);
+                        }
+                    }
+                    UiUpdate::CaptureResult(capture) => {
+                        if let Some(open) = settings_window.borrow().as_ref() {
+                            open.apply_capture(&capture);
+                        }
                     }
                     UiUpdate::Disconnected => {
                         root.add_css_class("disconnected");
@@ -219,11 +327,41 @@ fn build_ui(app: &gtk::Application) {
     window.present();
 }
 
+/// Shared handles for drag-to-reorder: the list, the in-flight drag slug,
+/// and the committed vs on-screen orders.
+struct DragCtx {
+    list: gtk::ListBox,
+    state: Rc<RefCell<Option<String>>>,
+    committed: Rc<RefCell<Vec<String>>>,
+    visual: Rc<RefCell<Vec<String>>>,
+}
+
+/// Move the row for `slug` to visual position `to`, keeping `visual` in
+/// sync. Re-inserting the same widget preserves it (controllers included).
+fn move_row(list: &gtk::ListBox, visual: &mut Vec<String>, slug: &str, to: usize) {
+    let Some(from) = visual.iter().position(|s| s == slug) else {
+        return;
+    };
+    let to = to.min(visual.len().saturating_sub(1));
+    if from == to {
+        return;
+    }
+    let Some(row) = list.row_at_index(from as i32) else {
+        return;
+    };
+    list.remove(&row);
+    list.insert(&row, to as i32);
+    let moved = visual.remove(from);
+    visual.insert(to, moved);
+}
+
 fn rebuild_rows(
     list: &gtk::ListBox,
     ui: &Rc<Ui>,
     projects: &[ProjectSummary],
     requests: &async_channel::Sender<UiRequest>,
+    settings_window: &settings::Shared,
+    drag_ctx: &Rc<DragCtx>,
 ) {
     while let Some(row) = list.row_at_index(0) {
         list.remove(&row);
@@ -234,7 +372,12 @@ fn rebuild_rows(
         let row = gtk::ListBoxRow::new();
         row.add_css_class("project-row");
         if project.active {
+            // Its workspace is on screen right now: green ring.
             row.add_css_class("active");
+            row.add_css_class("viewing");
+        } else if project.windows > 0 {
+            // Open (has windows) but not the workspace being viewed: yellow.
+            row.add_css_class("open");
         }
 
         let avatar = gtk::Label::new(Some(&initial_letters(&project.name)));
@@ -281,14 +424,65 @@ fn rebuild_rows(
         });
         row.add_controller(gesture);
 
+        // Drag to reorder: rows shuffle live under the drag (the list's
+        // drop target moves them on hover); dropping commits, a cancelled
+        // drag snaps everything back. A plain click still switches (drags
+        // only start past the movement threshold).
+        let source = gtk::DragSource::new();
+        source.set_actions(gtk::gdk::DragAction::MOVE);
+        {
+            let slug = project.slug.as_str().to_owned();
+            source.connect_prepare(move |_, _, _| {
+                Some(gtk::gdk::ContentProvider::for_value(&slug.to_value()))
+            });
+        }
+        {
+            let row = row.clone();
+            let drag = Rc::clone(drag_ctx);
+            let ui = Rc::clone(ui);
+            let slug = project.slug.as_str().to_owned();
+            source.connect_drag_begin(move |source, _| {
+                let paintable = gtk::WidgetPaintable::new(Some(&row));
+                source.set_icon(Some(&paintable), 0, 0);
+                row.add_css_class("dragging");
+                *drag.state.borrow_mut() = Some(slug.clone());
+                // Pin the rail open for the whole drag.
+                ui.cancel_timer();
+                ui.drag_active.set(true);
+                ui.set_expanded(true);
+            });
+        }
+        {
+            let row = row.clone();
+            let drag = Rc::clone(drag_ctx);
+            let ui = Rc::clone(ui);
+            source.connect_drag_end(move |_, _, _| {
+                row.remove_css_class("dragging");
+                // Still marked in-flight: the drop never happened
+                // (cancelled/escaped) — shuffle back to the daemon's order.
+                if drag.state.borrow_mut().take().is_some() {
+                    let committed = drag.committed.borrow().clone();
+                    let mut visual = drag.visual.borrow_mut();
+                    for (index, slug) in committed.iter().enumerate() {
+                        move_row(&drag.list, &mut visual, slug, index);
+                    }
+                }
+                // Unpin; the usual collapse countdown takes over.
+                ui.drag_active.set(false);
+                ui.schedule_collapse();
+            });
+        }
+        row.add_controller(source);
+
         // Right-click: management menu.
         let menu_gesture = gtk::GestureClick::new();
         menu_gesture.set_button(3);
         let menu_requests = requests.clone();
         let menu_project = project.clone();
         let menu_row = row.clone();
+        let menu_settings = Rc::clone(settings_window);
         menu_gesture.connect_released(move |_, _, _, _| {
-            open_row_menu(&menu_row, &menu_project, &menu_requests);
+            open_row_menu(&menu_row, &menu_project, &menu_requests, &menu_settings);
         });
         row.add_controller(menu_gesture);
 
@@ -301,6 +495,7 @@ fn open_row_menu(
     row: &gtk::ListBoxRow,
     project: &ProjectSummary,
     requests: &async_channel::Sender<UiRequest>,
+    settings_window: &settings::Shared,
 ) {
     let popover = gtk::Popover::new();
     popover.set_parent(row);
@@ -334,6 +529,23 @@ fn open_row_menu(
         UiRequest::Save(slug.clone()),
     ));
     menu.append(&action_button("Restore", UiRequest::Restore(slug.clone())));
+    menu.append(&action_button("Close windows", UiRequest::Close(slug.clone())));
+
+    // Apps…: the per-slot launch settings window.
+    let apps = gtk::Button::with_label("Apps…");
+    apps.add_css_class("menu-btn");
+    {
+        let popover = popover.clone();
+        let requests = requests.clone();
+        let settings_window = Rc::clone(settings_window);
+        let slug = slug.clone();
+        let name = project.name.clone();
+        apps.connect_clicked(move |_| {
+            settings::open(&slug, &name, &requests, &settings_window);
+            popover.popdown();
+        });
+    }
+    menu.append(&apps);
 
     // Rename: swap the popover content for an entry.
     let rename = gtk::Button::with_label("Rename…");

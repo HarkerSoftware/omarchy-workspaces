@@ -55,8 +55,12 @@ enum Command {
     },
     /// Switch to a project (slug, prefix, or fuzzy query).
     Switch {
-        /// Project query.
+        /// Project query (or a 1-based position with --index).
         query: String,
+        /// Treat the query as a 1-based position in the panel order
+        /// (for keybindings like ALT+1..9).
+        #[arg(short, long)]
+        index: bool,
     },
     /// List projects.
     List,
@@ -82,6 +86,11 @@ enum Command {
         /// Show the plan without executing it.
         #[arg(long)]
         dry_run: bool,
+    },
+    /// Close a project: gracefully close all of its windows.
+    Close {
+        /// Project query; defaults to the active project.
+        project: Option<String>,
     },
     /// Duplicate a project under a new name.
     Duplicate {
@@ -240,7 +249,7 @@ async fn main() -> std::process::ExitCode {
         Command::Create { name, slug } => commands::create(cli.socket, name, slug, cli.json).await,
         Command::Delete { slug, yes } => commands::delete(cli.socket, slug, yes).await,
         Command::Rename { slug, name } => commands::rename(cli.socket, slug, name).await,
-        Command::Switch { query } => commands::switch(cli.socket, query).await,
+        Command::Switch { query, index } => commands::switch(cli.socket, query, index).await,
         Command::List => commands::list(cli.socket, cli.json).await,
         Command::Assign {
             address,
@@ -248,6 +257,7 @@ async fn main() -> std::process::ExitCode {
             group,
         } => commands::assign(cli.socket, address, project, group).await,
         Command::Save { project } => commands::save(cli.socket, project).await,
+        Command::Close { project } => commands::close(cli.socket, project).await,
         Command::Restore { project, dry_run } => {
             commands::restore(cli.socket, project, dry_run, cli.json).await
         }

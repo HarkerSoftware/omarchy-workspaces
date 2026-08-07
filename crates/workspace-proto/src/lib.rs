@@ -112,6 +112,52 @@ pub enum Request {
         #[serde(default)]
         dry_run: bool,
     },
+    /// Close a project: gracefully close every window assigned to it.
+    #[serde(rename = "project.close")]
+    ProjectClose {
+        /// Project query; defaults to the active project.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
+    /// Reorder projects: the given slugs take positions 0.. in order;
+    /// unlisted projects keep their relative order after them.
+    #[serde(rename = "project.reorder")]
+    ProjectReorder {
+        /// Exact slugs in the desired order.
+        order: Vec<String>,
+    },
+    /// Fetch one project's full definition (slots with launch specs).
+    #[serde(rename = "project.get")]
+    ProjectGet {
+        /// Project query.
+        project: String,
+    },
+    /// Preview what `project.save` would capture from the project's current
+    /// windows, without persisting anything.
+    #[serde(rename = "project.capture")]
+    ProjectCapture {
+        /// Project query; defaults to the active project.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        project: Option<String>,
+    },
+    /// Update one app slot's launch settings. `None` leaves a field
+    /// unchanged; an empty string clears it.
+    #[serde(rename = "slot.update")]
+    SlotUpdate {
+        /// Project query.
+        project: String,
+        /// The slot's UUID.
+        slot_id: String,
+        /// Full launch command line.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        command: Option<String>,
+        /// Working directory.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        workdir: Option<String>,
+        /// Browser profile directory (managed as `--profile-directory=`).
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        profile: Option<String>,
+    },
     /// Dry-run the rules engine against a window.
     #[serde(rename = "rules.test")]
     RulesTest {

@@ -37,6 +37,17 @@ window#workspace-panel {
   color: @panel_fg;
   font-weight: 700;
   font-size: 12px;
+  /* Constant-width ring so state changes never shift the layout. */
+  border: 2px solid transparent;
+  transition: border-color 160ms ease;
+}
+
+.project-row.viewing .avatar {
+  border-color: @panel_viewing;
+}
+
+.project-row.open .avatar {
+  border-color: @panel_open;
 }
 
 .project-row.active .avatar {
@@ -98,4 +109,57 @@ window#workspace-panel {
 .menu-btn.destructive {
   background-color: alpha(@panel_danger, 0.8);
   color: @panel_bg;
+}
+
+/* Per-project app settings window. */
+
+.settings {
+  padding: 12px;
+}
+
+.settings-status {
+  color: alpha(@panel_fg, 0.7);
+  font-size: 12px;
+  margin: 0 2px;
+}
+
+.slot-card {
+  padding: 10px;
+  margin: 0 2px;
+  border-radius: 10px;
+  background-color: alpha(@panel_fg, 0.06);
+}
+
+.slot-class {
+  font-weight: 700;
+  font-size: 12px;
+}
+
+.field-label {
+  color: alpha(@panel_fg, 0.65);
+  font-size: 12px;
+  min-width: 72px;
+}
+
+.menu-btn.suggested {
+  background-color: alpha(@panel_accent, 0.8);
+  color: @panel_bg;
+}
+.project-row.dragging {
+  opacity: 0.35;
+}
+
+/* GTK paints its own highlight on drop targets during a drag (and rows can
+ * pick up a focus ring when re-inserted mid-shuffle); the dimmed row and
+ * live shuffle are feedback enough. */
+.projects:drop(active),
+.project-row:drop(active) {
+  box-shadow: none;
+  outline: none;
+}
+
+.project-row:focus,
+.project-row:focus-visible,
+.project-row:focus-within {
+  outline: none;
 }

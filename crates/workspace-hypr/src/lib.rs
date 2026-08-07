@@ -22,7 +22,7 @@ pub mod socket;
 #[cfg(any(test, feature = "fake"))]
 pub mod fake;
 
-pub use ctl::{Dispatch, HyprCtl, WsTarget};
+pub use ctl::{Dispatch, HyprCtl, MoveDir, WsTarget};
 pub use events::{HyprEvent, StreamItem};
 pub use model::{Client, Monitor, WindowAddress, Workspace, WorkspaceRef};
 pub use socket::HyprPaths;

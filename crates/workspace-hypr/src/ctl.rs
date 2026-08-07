@@ -33,6 +33,31 @@ impl std::fmt::Display for WsTarget {
     }
 }
 
+/// A cardinal direction for directional dispatchers (`swapwindow`,
+/// `movewindow`, `movefocus`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum MoveDir {
+    /// Left.
+    Left,
+    /// Right.
+    Right,
+    /// Up.
+    Up,
+    /// Down.
+    Down,
+}
+
+impl std::fmt::Display for MoveDir {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(match self {
+            Self::Left => "l",
+            Self::Right => "r",
+            Self::Up => "u",
+            Self::Down => "d",
+        })
+    }
+}
+
 /// A typed Hyprland dispatcher. Rendered to the wire string by [`Dispatch::render`].
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Dispatch {
@@ -54,6 +79,24 @@ pub enum Dispatch {
     },
     /// Focus a specific window.
     FocusWindow(WindowAddress),
+    /// Ask a window's client to close (graceful, like clicking the X).
+    CloseWindow(WindowAddress),
+    /// Swap the focused window with its neighbor in a direction (tiled).
+    SwapWindow(MoveDir),
+    /// Move the focused window in a direction; toward an empty edge this
+    /// re-splits the layout in that orientation (side-by-side ⇄ stacked).
+    MoveWindowDir(MoveDir),
+    /// Toggle the focused window's split orientation (dwindle; requires
+    /// settled focus — batching it with `focuswindow` races).
+    ToggleSplit,
+    /// Resize the focused window to an exact size; on tiled windows this
+    /// adjusts the surrounding split ratios.
+    ResizeActiveExact {
+        /// Width in pixels.
+        w: i32,
+        /// Height in pixels.
+        h: i32,
+    },
     /// Launch a command, optionally with exec rules like `workspace name:x silent`.
     Exec {
         /// Exec rules placed in `[…]` before the command.
@@ -106,6 +149,11 @@ impl Dispatch {
                 format!("movetoworkspace {target},{}", address.dispatch_arg())
             }
             Self::FocusWindow(address) => format!("focuswindow {}", address.dispatch_arg()),
+            Self::CloseWindow(address) => format!("closewindow {}", address.dispatch_arg()),
+            Self::SwapWindow(dir) => format!("swapwindow {dir}"),
+            Self::MoveWindowDir(dir) => format!("movewindow {dir}"),
+            Self::ToggleSplit => "layoutmsg togglesplit".to_owned(),
+            Self::ResizeActiveExact { w, h } => format!("resizeactive exact {w} {h}"),
             Self::Exec { rules, command } => {
                 if rules.is_empty() {
                     format!("exec {command}")

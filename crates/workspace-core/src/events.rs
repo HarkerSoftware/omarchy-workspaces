@@ -92,6 +92,20 @@ pub enum DomainEvent {
         /// New display name.
         name: String,
     },
+    /// Projects were manually reordered.
+    #[serde(rename = "project.reordered")]
+    ProjectsReordered {
+        /// All project slugs in their new order.
+        order: Vec<String>,
+    },
+    /// A project was closed: its windows were asked to close.
+    #[serde(rename = "project.closed")]
+    ProjectClosed {
+        /// Project slug.
+        slug: String,
+        /// Number of windows asked to close.
+        windows: usize,
+    },
     /// The active project changed (`None` = no project active).
     #[serde(rename = "project.switched")]
     ProjectSwitched {
@@ -159,6 +173,8 @@ impl DomainEvent {
             Self::ProjectCreated { .. }
             | Self::ProjectDeleted { .. }
             | Self::ProjectRenamed { .. }
+            | Self::ProjectClosed { .. }
+            | Self::ProjectsReordered { .. }
             | Self::ProjectSwitched { .. }
             | Self::GroupChanged { .. } => "projects",
             Self::RestoreProgress { .. } | Self::RestoreFinished { .. } => "restore",

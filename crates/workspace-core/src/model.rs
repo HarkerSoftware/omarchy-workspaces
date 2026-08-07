@@ -126,6 +126,10 @@ pub struct Project {
     /// Preferred monitor for the project's primary workspace, by output name.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub monitor: Option<String>,
+    /// Manual sort position in project listings (lower sorts first; ties
+    /// break by slug).
+    #[serde(default)]
+    pub position: u32,
 }
 
 impl Project {
@@ -138,6 +142,7 @@ impl Project {
             groups: Vec::new(),
             apps: Vec::new(),
             monitor: None,
+            position: 0,
         })
     }
 }
@@ -271,10 +276,12 @@ pub struct Placement {
     /// Whether the window should float.
     #[serde(default)]
     pub floating: bool,
-    /// Position of the top-left corner, for floating windows.
+    /// Captured position of the top-left corner. Floating windows are moved
+    /// here exactly; tiled windows are swapped toward it in the layout.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub position: Option<(i32, i32)>,
-    /// Size in pixels, for floating windows.
+    /// Captured size in pixels. Applied exactly to floating windows; for
+    /// tiled windows it only scales the layout-matching tolerance.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub size: Option<(i32, i32)>,
     /// Fullscreen mode: 0 = none, 1 = maximize, 2 = fullscreen (Hyprland semantics).

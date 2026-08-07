@@ -382,6 +382,27 @@ async fn project_lifecycle_and_switching() {
 
     let list = client.request(Request::ProjectList).await;
     assert_eq!(list.as_array().unwrap().len(), 2);
+    // Creation order is the initial order.
+    assert_eq!(list[0]["slug"], "web-development");
+    assert_eq!(list[1]["slug"], "ai");
+
+    // Manual reorder (panel drag-and-drop) puts 'ai' first and persists.
+    let reordered = client
+        .request(Request::ProjectReorder {
+            order: vec!["ai".into(), "web-development".into()],
+        })
+        .await;
+    assert_eq!(reordered["order"][0], "ai");
+    let list = client.request(Request::ProjectList).await;
+    assert_eq!(list[0]["slug"], "ai");
+    assert_eq!(list[1]["slug"], "web-development");
+    // Unknown slugs are refused.
+    let raw = client
+        .request_raw(Request::ProjectReorder {
+            order: vec!["nope".into()],
+        })
+        .await;
+    assert!(!raw.ok);
 
     // Duplicate slug is refused.
     let raw = client
@@ -431,6 +452,8 @@ async fn project_lifecycle_and_switching() {
             .await
             .contains(&"movetoworkspacesilent name:ai,address:0xaaa1".to_string())
     );
+    // The compositor executes the move; window counts follow the workspace.
+    fake.emit("movewindowv2>>0xaaa1,-100,ai").await;
     let snapshot = wait_for_snapshot(&mut client, "assignment", |s| {
         s.projects
             .iter()
@@ -635,6 +658,24 @@ async fn projects_and_assignments_survive_restart() {
             group: None,
         })
         .await;
+    // The compositor executes the dispatched move; save captures the
+    // windows on the project workspace. Save re-fetches clients for fresh
+    // geometry, so the fake's dump must reflect the move too.
+    fake.emit("movewindowv2>>0xaaa1,-100,web-development").await;
+    fake.set_response(
+        "j/clients",
+        &CLIENTS_JSON.replace(
+            r#""workspace": {"id": 1, "name": "1"}"#,
+            r#""workspace": {"id": -100, "name": "web-development"}"#,
+        ),
+    )
+    .await;
+    wait_for_snapshot(&mut client, "window on project workspace", |s| {
+        s.windows
+            .iter()
+            .any(|w| w.address == "0xaaa1" && w.facts.workspace == "web-development")
+    })
+    .await;
     let saved = client
         .request(Request::ProjectSave {
             project: Some("web-development".into()),
@@ -678,6 +719,90 @@ async fn projects_and_assignments_survive_restart() {
         window.assigned_by,
         Some(workspace_core::world::AssignmentSource::Manual)
     ));
+
+    shutdown.cancel();
+    daemon.await.unwrap().unwrap();
+}
+
+#[tokio::test]
+async fn switching_to_a_closed_project_restores_it() {
+    // A project with saved apps but no windows on its workspaces: switching
+    // to it must start a restore by itself — no separate Restore click.
+    let dir = tempfile::tempdir().unwrap();
+    let state_dir = dir.path().join("state");
+    std::fs::create_dir_all(state_dir.join("projects")).unwrap();
+    std::fs::write(
+        state_dir.join("projects/dev.toml"),
+        r#"
+version = 1
+
+[project]
+id = "0b0e9db1-2f5c-4b3a-9a53-111111111111"
+slug = "dev"
+name = "Dev"
+
+[[project.apps]]
+slot_id = "0b0e9db1-2f5c-4b3a-9a53-333333333333"
+name = "term"
+[project.apps.identity]
+class = "kitty"
+[project.apps.launch]
+command = "kitty"
+"#,
+    )
+    .unwrap();
+
+    let hypr_dir = dir.path().join("hypr");
+    std::fs::create_dir_all(&hypr_dir).unwrap();
+    let fake = FakeHypr::spawn(&hypr_dir).await.unwrap();
+    // The only live window (firefox) sits on workspace "1" — the dev
+    // workspace is empty, so the project counts as closed.
+    fake.set_response("j/clients", CLIENTS_JSON).await;
+    fake.set_response("j/workspaces", WORKSPACES_JSON).await;
+    fake.set_response("j/monitors", MONITORS_JSON).await;
+    fake.set_response("j/activewindow", "{}").await;
+
+    let options = AppOptions {
+        hypr_paths: fake.paths.clone(),
+        runtime_dir: dir.path().join("run"),
+        config: Config::default(),
+        config_dir: None,
+        state_dir: Some(state_dir),
+    };
+    let socket = options.runtime_dir.join("daemon.sock");
+    let shutdown = CancellationToken::new();
+    let daemon = tokio::spawn(app::run(options, shutdown.clone()));
+    for _ in 0..200 {
+        if socket.exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let mut client = TestClient::connect(&socket).await;
+    wait_for_snapshot(&mut client, "hydration", |s| s.hypr_connected).await;
+
+    let switched = client
+        .request(Request::ProjectSwitch {
+            project: "dev".into(),
+        })
+        .await;
+    assert_eq!(switched["slug"], "dev");
+
+    // The auto-restore launches the missing terminal.
+    let mut launched = false;
+    for _ in 0..300 {
+        if fake
+            .dispatches()
+            .await
+            .iter()
+            .any(|d| d == "exec [workspace name:dev silent] kitty")
+        {
+            launched = true;
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(launched, "switch did not trigger a restore");
 
     shutdown.cancel();
     daemon.await.unwrap().unwrap();
@@ -730,7 +855,14 @@ class = "firefox"
     let hypr_dir = dir.path().join("hypr");
     std::fs::create_dir_all(&hypr_dir).unwrap();
     let fake = FakeHypr::spawn(&hypr_dir).await.unwrap();
-    fake.set_response("j/clients", CLIENTS_JSON).await;
+    // The firefox window already sits on the project workspace — only such
+    // windows are adoption candidates; look-alikes on other workspaces are
+    // deliberately out of reach.
+    fake.set_response(
+        "j/clients",
+        &CLIENTS_JSON.replace(r#""workspace": {"id": 1, "name": "1"}"#, r#""workspace": {"id": -100, "name": "dev"}"#),
+    )
+    .await;
     fake.set_response("j/workspaces", WORKSPACES_JSON).await;
     fake.set_response("j/monitors", MONITORS_JSON).await;
     fake.set_response("j/activewindow", "{}").await;
@@ -762,7 +894,7 @@ class = "firefox"
         })
         .await;
     assert_eq!(plan["adopt"][0]["label"], "browser");
-    assert_eq!(plan["adopt"][0]["needs_move"], true);
+    assert_eq!(plan["adopt"][0]["needs_move"], false);
     assert_eq!(plan["waves"][0][0]["label"], "db");
     assert_eq!(plan["waves"][1][0]["label"], "term");
     // Dry run has no side effects.
@@ -801,9 +933,10 @@ class = "firefox"
             .any(|d| d == "exec [workspace name:dev silent] kitty"),
         "{dispatches:?}"
     );
-    // The firefox window was adopted onto the project workspace.
+    // The firefox window was adopted in place (already on the project
+    // workspace), so no move was dispatched for it.
     assert!(
-        dispatches
+        !dispatches
             .iter()
             .any(|d| d == "movetoworkspacesilent name:dev,address:0xaaa1"),
         "{dispatches:?}"
@@ -894,6 +1027,7 @@ async fn group_lifecycle_hide_show_focus_move() {
             .await
             .contains(&"movetoworkspacesilent name:web,address:0xaaa1".to_string())
     );
+    fake.emit("movewindowv2>>0xaaa1,-100,web").await;
 
     // Hide parks it on the group workspace; show brings it back.
     let hidden = client
@@ -951,6 +1085,7 @@ async fn group_lifecycle_hide_show_focus_move() {
             .await
             .contains(&"movetoworkspacesilent name:other,address:0xaaa1".to_string())
     );
+    fake.emit("movewindowv2>>0xaaa1,-102,other").await;
     let snapshot = wait_for_snapshot(&mut client, "group moved", |s| {
         s.projects
             .iter()
