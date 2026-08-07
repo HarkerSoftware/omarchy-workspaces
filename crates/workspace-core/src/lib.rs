@@ -8,7 +8,11 @@
 #![warn(missing_docs)]
 
 pub mod config;
+pub mod events;
 pub mod model;
+pub mod world;
 pub mod ws_names;
 
+pub use events::DomainEvent;
 pub use model::{AppSlot, Group, Placement, Project, ProjectId, Slug, WindowIdentity};
+pub use world::{TrackedWindow, WindowFacts, World};
