@@ -96,8 +96,8 @@ fn remove_block(path: &PathBuf) -> std::io::Result<bool> {
 
 const LAYER_RULES: &str = "\
 # Managed by `workspace panel enable`; removed by `workspace panel disable`.
-layerrule = blur, workspace-panel
-layerrule = ignorealpha 0.2, workspace-panel";
+layerrule = blur on, match:namespace workspace-panel
+layerrule = ignore_alpha 0.2, match:namespace workspace-panel";
 
 /// `workspace panel enable`.
 pub async fn enable() -> u8 {
