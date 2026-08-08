@@ -131,15 +131,18 @@ jobs:
           DEPLOY_KEY: ${{ secrets.ARCH_REPO_DEPLOY_KEY }}
         run: |
           version="${TAG#v}"
-          mkdir -p ~/.ssh
-          echo "$DEPLOY_KEY" > ~/.ssh/id_ed25519
-          chmod 600 ~/.ssh/id_ed25519
+          # Explicit paths only: OpenSSH expands `~` from passwd (/root),
+          # not $HOME, and container jobs run with HOME=/github/home — a
+          # `~/.ssh` written by the shell is invisible to ssh.
+          mkdir -p "$HOME/.ssh"
+          echo "$DEPLOY_KEY" > "$HOME/.ssh/id_ed25519"
+          chmod 600 "$HOME/.ssh/id_ed25519"
           # GitHub's official host keys, fetched over TLS from their API —
           # authenticated, unlike ssh-keyscan, and never stale, unlike a
           # hardcoded pin.
           curl -fsSL https://api.github.com/meta |
-            jq -r '.ssh_keys[] | "github.com \(.)"' >> ~/.ssh/known_hosts
-          export GIT_SSH_COMMAND="ssh -i ~/.ssh/id_ed25519 -o IdentitiesOnly=yes"
+            jq -r '.ssh_keys[] | "github.com \(.)"' > "$HOME/.ssh/known_hosts"
+          export GIT_SSH_COMMAND="ssh -i $HOME/.ssh/id_ed25519 -o IdentitiesOnly=yes -o UserKnownHostsFile=$HOME/.ssh/known_hosts"
           git clone --depth 1 git@github.com:HarkerSoftware/arch-repo.git
           cd arch-repo/x86_64
           cp /home/builder/omarchy-workspaces-"$version"-*-x86_64.pkg.tar.zst .
