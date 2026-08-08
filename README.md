@@ -174,6 +174,17 @@ hand-built split trees may land approximately).
 ./contrib/check.sh   # fmt + clippy -D warnings + all tests
 ```
 
+**Cutting a release** — move the `[Unreleased]` CHANGELOG items under
+the new version heading, then:
+
+```sh
+./packaging/release.sh minor   # or: patch | major | X.Y.Z
+```
+
+One command: gates on checks and the CHANGELOG entry, bumps
+`Cargo.toml` + `PKGBUILD`, commits, tags, pushes, waits for the GitHub
+release build, and publishes to the pacman repository.
+
 The daemon runs entirely against a scripted fake Hyprland in tests; see
 `crates/workspace-hypr/src/fake.rs` and `crates/workspace-daemon/tests/`.
 Architecture notes in [docs/architecture.md](docs/architecture.md), wire
