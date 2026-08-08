@@ -98,10 +98,10 @@ command = "code ~/Projects/api"
 after = ["postgres"]
 ```
 
-## Install
+## Install on Omarchy
 
-**Pacman repository** (recommended — prebuilt binaries, automatic
-updates with `pacman -Syu` / `omarchy update`). Append to
+**1. Add the package repository** (prebuilt binaries; updates arrive
+with every `omarchy update` / `pacman -Syu`). Append to
 `/etc/pacman.conf`:
 
 ```ini
@@ -110,12 +110,42 @@ SigLevel = Optional TrustAll
 Server = https://raw.githubusercontent.com/HarkerSoftware/arch-repo/main/$arch
 ```
 
-then:
+**2. Install and start the daemon:**
 
 ```sh
 sudo pacman -Sy omarchy-workspaces
-sudo systemctl daemon-reload
 systemctl --user enable --now omarchy-workspaces
+```
+
+**3. Enable the sidebar** (adds the autostart entry and layer rules,
+and starts it now):
+
+```sh
+workspace panel enable
+```
+
+**4. First project** — click **+** in the sidebar (or
+`workspace create "My Project"`), open your apps on that workspace,
+arrange them, then right-click the project → **Save windows**. From
+then on the project reopens itself — windows, folders, browser tabs,
+and layout — whenever you click it, even after a reboot.
+
+**Optional — number hotkeys**: add to `~/.config/hypr/bindings.conf`
+(N = position in the sidebar):
+
+```
+bindd = ALT, 1, Project workspace 1, exec, workspace switch --index 1
+```
+
+`workspace doctor` checks the installation end to end when anything
+seems off.
+
+### Other install methods
+
+**Binary installer** (no repo setup, no automatic updates):
+
+```sh
+curl -fsSL https://github.com/HarkerSoftware/omarchy-workspaces/raw/main/packaging/install.sh | bash
 ```
 
 **From source** (needs stable Rust; the panel needs `gtk4` +
@@ -124,31 +154,19 @@ systemctl --user enable --now omarchy-workspaces
 ```sh
 cargo build --release
 install -Dm755 target/release/{workspace,workspace-daemon,workspace-panel} -t ~/.local/bin/
-```
-
-**Daemon autostart** — either the systemd user unit:
-
-```sh
 cp contrib/omarchy-workspaces.service ~/.config/systemd/user/
 systemctl --user daemon-reload
 systemctl --user enable --now omarchy-workspaces
 ```
 
-…or Omarchy-style, in `~/.config/hypr/autostart.conf`:
+## What restore does
 
-```
-exec-once = uwsm-app -- workspace-daemon
-```
-
-AUR packages and a curl-able `install.sh` ship with the first tagged
-release (see `packaging/`).
-
-## What v1 does and does not restore
-
-Restore relaunches missing apps in dependency order, adopts matching live
-windows, and re-applies **floating** geometry and fullscreen state. The
-tiled layout tree (dwindle splits) is *not* serialized — Hyprland has no
-stable layout-dump API; tiled windows re-flow under the current layout.
+Restore relaunches missing apps in dependency order (with their working
+directories, VS Code folders, chromium profile and tabs), adopts
+matching live windows already on the project workspace, re-applies
+floating geometry and fullscreen state, and rebuilds the captured tiled
+arrangement best-effort (swap/re-split/resize passes — exotic
+hand-built split trees may land approximately).
 
 ## Development
 
