@@ -174,16 +174,17 @@ hand-built split trees may land approximately).
 ./contrib/check.sh   # fmt + clippy -D warnings + all tests
 ```
 
-**Cutting a release** — move the `[Unreleased]` CHANGELOG items under
-the new version heading, then:
+**Cutting a release** — one button, fully automated in CI:
 
 ```sh
-./packaging/release.sh minor   # or: patch | major | X.Y.Z
+./packaging/release.sh minor   # or: patch | major
 ```
 
-One command: gates on checks and the CHANGELOG entry, bumps
-`Cargo.toml` + `PKGBUILD`, commits, tags, pushes, waits for the GitHub
-release build, and publishes to the pacman repository.
+…or GitHub → Actions → Release → *Run workflow*. Either way CI bumps
+`Cargo.toml` + `PKGBUILD`, rolls the `[Unreleased]` CHANGELOG section
+under the new version, commits, tags, builds, publishes the GitHub
+release, and updates the pacman repository. Keeping `[Unreleased]`
+tidy as features land is the only manual part.
 
 The daemon runs entirely against a scripted fake Hyprland in tests; see
 `crates/workspace-hypr/src/fake.rs` and `crates/workspace-daemon/tests/`.

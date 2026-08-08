@@ -1,25 +1,88 @@
 name: Release
 
+# Two ways in:
+# - push a v* tag (e.g. from ./packaging/release.sh)
+# - "Run workflow" with a bump choice: CI bumps the version, rolls the
+#   CHANGELOG, commits, tags — then builds and publishes exactly as if
+#   the tag had been pushed.
+# Either way the run ends with binaries on the GitHub release AND the
+# pacman repository (HarkerSoftware/arch-repo) serving the new version.
+
 on:
   push:
     tags: ["v*"]
+  workflow_dispatch:
+    inputs:
+      bump:
+        description: "Version bump"
+        type: choice
+        options: [minor, patch, major]
+        default: minor
 
 permissions:
   contents: write
 
+concurrency:
+  group: release
+  cancel-in-progress: false
+
 jobs:
+  cut:
+    if: github.event_name == 'workflow_dispatch'
+    runs-on: ubuntu-latest
+    outputs:
+      tag: ${{ steps.bump.outputs.tag }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+      - uses: dtolnay/rust-toolchain@stable
+      - name: Bump version, roll CHANGELOG, tag
+        id: bump
+        run: |
+          set -euo pipefail
+          current=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
+          IFS=. read -r major minor patch <<<"$current"
+          case "${{ inputs.bump }}" in
+            major) next="$((major + 1)).0.0" ;;
+            minor) next="$major.$((minor + 1)).0" ;;
+            patch) next="$major.$minor.$((patch + 1))" ;;
+          esac
+          echo "Releasing v$next (current v$current)"
+          sed -i "s/^version = \"$current\"/version = \"$next\"/" Cargo.toml
+          sed -i "s/^pkgver=.*/pkgver=$next/; s/^pkgrel=.*/pkgrel=1/" packaging/PKGBUILD
+          # Roll [Unreleased] into the new version heading.
+          sed -i "s/^## \[Unreleased\]/## [Unreleased]\n\n## [$next] - $(date -u +%F)/" CHANGELOG.md
+          cargo update --workspace --quiet
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add Cargo.toml Cargo.lock packaging/PKGBUILD CHANGELOG.md
+          git commit -m "Release v$next"
+          git tag -a "v$next" -m "v$next"
+          git push origin main "v$next"
+          echo "tag=v$next" >> "$GITHUB_OUTPUT"
+
   release:
+    needs: [cut]
+    # Runs for tag pushes (cut skipped) and for successful dispatch cuts.
+    if: >-
+      always() &&
+      (github.event_name == 'push' || needs.cut.result == 'success')
     runs-on: ubuntu-latest
     container: archlinux:base-devel
+    env:
+      TAG: ${{ github.event_name == 'push' && github.ref_name || needs.cut.outputs.tag }}
     steps:
       - name: Install toolchain and system deps
         run: pacman -Syu --noconfirm rust gtk4 gtk4-layer-shell pkgconf git
       - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
       - name: Build
         run: cargo build --release --workspace
       - name: Package
         run: |
-          version="${GITHUB_REF_NAME#v}"
+          version="${TAG#v}"
           staging="omarchy-workspaces-$version-x86_64"
           mkdir -p "$staging/contrib"
           cp target/release/workspace target/release/workspace-daemon \
@@ -32,7 +95,58 @@ jobs:
       - name: Create release
         uses: softprops/action-gh-release@v2
         with:
+          tag_name: ${{ env.TAG }}
           files: |
             omarchy-workspaces-*.tar.gz
             SHA256SUMS
           generate_release_notes: true
+
+  publish-pacman-repo:
+    needs: [cut, release]
+    if: >-
+      always() && needs.release.result == 'success'
+    runs-on: ubuntu-latest
+    container: archlinux:base-devel
+    env:
+      TAG: ${{ github.event_name == 'push' && github.ref_name || needs.cut.outputs.tag }}
+    steps:
+      - name: Install build deps
+        run: pacman -Syu --noconfirm rust gtk4 gtk4-layer-shell pkgconf git openssh
+      - uses: actions/checkout@v4
+        with:
+          ref: ${{ env.TAG }}
+      - name: Build package
+        run: |
+          version="${TAG#v}"
+          useradd -m builder
+          cp packaging/PKGBUILD /home/builder/
+          # The tag tarball is fetched over TLS from this same repository;
+          # no independent pin adds anything here.
+          sed -i "s/^sha256sums=.*/sha256sums=('SKIP')/" /home/builder/PKGBUILD
+          cd /home/builder
+          chown -R builder .
+          runuser -u builder -- makepkg -d --noconfirm
+      - name: Push to arch-repo
+        env:
+          DEPLOY_KEY: ${{ secrets.ARCH_REPO_DEPLOY_KEY }}
+        run: |
+          version="${TAG#v}"
+          mkdir -p ~/.ssh
+          echo "$DEPLOY_KEY" > ~/.ssh/id_ed25519
+          chmod 600 ~/.ssh/id_ed25519
+          ssh-keyscan github.com >> ~/.ssh/known_hosts 2>/dev/null
+          git clone --depth 1 git@github.com:HarkerSoftware/arch-repo.git
+          cd arch-repo/x86_64
+          cp /home/builder/omarchy-workspaces-"$version"-*-x86_64.pkg.tar.zst .
+          rm -f omarchy-workspaces-debug-*.pkg.tar.zst
+          repo-add harkersoftware.db.tar.gz \
+            omarchy-workspaces-"$version"-*-x86_64.pkg.tar.zst
+          # GitHub raw serves symlinks as text; ship real copies.
+          rm harkersoftware.db harkersoftware.files
+          cp harkersoftware.db.tar.gz harkersoftware.db
+          cp harkersoftware.files.tar.gz harkersoftware.files
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git commit -m "omarchy-workspaces $version"
+          git push
