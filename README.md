@@ -100,6 +100,24 @@ after = ["postgres"]
 
 ## Install
 
+**Pacman repository** (recommended — prebuilt binaries, automatic
+updates with `pacman -Syu` / `omarchy update`). Append to
+`/etc/pacman.conf`:
+
+```ini
+[harkersoftware]
+SigLevel = Optional TrustAll
+Server = https://raw.githubusercontent.com/HarkerSoftware/arch-repo/main/$arch
+```
+
+then:
+
+```sh
+sudo pacman -Sy omarchy-workspaces
+sudo systemctl daemon-reload
+systemctl --user enable --now omarchy-workspaces
+```
+
 **From source** (needs stable Rust; the panel needs `gtk4` +
 `gtk4-layer-shell`, already present on Omarchy):
 
