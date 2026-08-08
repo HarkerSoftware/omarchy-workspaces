@@ -384,6 +384,9 @@ pub struct DaemonStatus {
     pub windows: usize,
     /// Number of known projects.
     pub projects: usize,
+    /// A newer release than the running daemon, when one is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<String>,
 }
 
 /// One project in `project.list` results and events.
@@ -421,6 +424,9 @@ pub struct Snapshot {
     pub focused_window: Option<String>,
     /// Whether the Hyprland event socket is connected.
     pub hypr_connected: bool,
+    /// A newer release than the running daemon, when one is known.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub update_available: Option<String>,
 }
 
 #[cfg(test)]

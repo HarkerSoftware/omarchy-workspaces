@@ -154,6 +154,12 @@ pub enum DomainEvent {
         /// Whether the connection is up.
         up: bool,
     },
+    /// A newer release is available.
+    #[serde(rename = "daemon.update_available")]
+    UpdateAvailable {
+        /// The newer version (without the `v` prefix).
+        version: String,
+    },
     /// The daemon is exiting.
     #[serde(rename = "daemon.shutting_down")]
     ShuttingDown,
@@ -178,7 +184,9 @@ impl DomainEvent {
             | Self::ProjectSwitched { .. }
             | Self::GroupChanged { .. } => "projects",
             Self::RestoreProgress { .. } | Self::RestoreFinished { .. } => "restore",
-            Self::HyprConnection { .. } | Self::ShuttingDown => "daemon",
+            Self::HyprConnection { .. } | Self::UpdateAvailable { .. } | Self::ShuttingDown => {
+                "daemon"
+            }
         }
     }
 }

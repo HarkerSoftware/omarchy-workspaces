@@ -12,3 +12,4 @@ pub mod launcher;
 pub mod lock;
 pub mod server;
 pub mod snss;
+pub mod updates;

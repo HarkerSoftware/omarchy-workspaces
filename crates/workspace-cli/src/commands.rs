@@ -545,6 +545,9 @@ pub async fn status(socket: Option<PathBuf>, json: bool) -> u8 {
     match serde_json::from_value::<DaemonStatus>(result) {
         Ok(status) => {
             println!("daemon      v{} (up {}s)", status.version, status.uptime_s);
+            if let Some(update) = &status.update_available {
+                println!("update      v{update} available — install via pacman -Syu");
+            }
             println!(
                 "hyprland    {}",
                 if status.hypr_connected {

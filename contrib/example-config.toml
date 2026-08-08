@@ -25,3 +25,8 @@ default_timeout_ms = 15000
 [log]
 # Overridden by RUST_LOG when set.
 level = "info"
+
+# Periodic update check (notify only — installs stay with pacman).
+[updates]
+check = true
+interval_hours = 24

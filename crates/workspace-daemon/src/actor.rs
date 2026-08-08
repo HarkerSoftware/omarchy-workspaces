@@ -70,6 +70,8 @@ pub enum Command {
     },
     /// Persist the runtime snapshot now (autosave debounce fires this).
     Persist,
+    /// The update checker found a newer release.
+    UpdateAvailable(String),
     /// A save/capture request together with freshly fetched client state
     /// (geometry is refreshed before capturing).
     RequestWithGeometry {
@@ -190,6 +192,7 @@ pub fn spawn(
         state_dir,
         self_tx: cmd_tx.clone(),
         hydrated_once: false,
+        update_available: None,
         restoring: Default::default(),
         started: Instant::now(),
         seq: 0,
@@ -229,6 +232,8 @@ struct StateActor {
     self_tx: mpsc::Sender<Command>,
     /// Whether the first hydration has happened (gates restore_on_boot).
     hydrated_once: bool,
+    /// Newer release found by the update checker, if any.
+    update_available: Option<String>,
     /// Slugs with a restore run in flight (guards double-restores; cleared
     /// by the run's `RestoreFinished` event).
     restoring: std::collections::HashSet<String>,
@@ -326,6 +331,26 @@ impl StateActor {
             }
             Command::Persist => {
                 self.persist_runtime();
+            }
+            Command::UpdateAvailable(version) => {
+                if self.update_available.as_deref() != Some(version.as_str()) {
+                    tracing::info!(%version, "newer release available");
+                    self.update_available = Some(version.clone());
+                    self.emit(DomainEvent::UpdateAvailable {
+                        version: version.clone(),
+                    });
+                    // Best-effort desktop notification; absence of
+                    // notify-send is fine.
+                    let _ = std::process::Command::new("notify-send")
+                        .args([
+                            "omarchy-workspaces",
+                            &format!(
+                                "v{version} is available (running v{}) — update via pacman -Syu",
+                                env!("CARGO_PKG_VERSION")
+                            ),
+                        ])
+                        .spawn();
+                }
             }
             Command::CorrelateRestore {
                 address,
@@ -2095,6 +2120,7 @@ impl StateActor {
             }),
             windows: self.world.windows.len(),
             projects: self.projects.len(),
+            update_available: self.update_available.clone(),
         }
     }
 
@@ -2110,6 +2136,7 @@ impl StateActor {
             monitors: self.world.monitors.clone(),
             focused_window: self.world.focused_window.clone(),
             hypr_connected: self.world.hypr_connected,
+            update_available: self.update_available.clone(),
         }
     }
 

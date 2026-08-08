@@ -59,6 +59,10 @@ pub async fn run(options: AppOptions, shutdown: CancellationToken) -> anyhow::Re
         options.state_dir.clone(),
     );
 
+    tokio::spawn(crate::updates::run(
+        options.config.updates.clone(),
+        handles.commands.clone(),
+    ));
     tokio::spawn(crate::autosave::run(
         options.config.autosave.clone(),
         handles.bus.subscribe(),

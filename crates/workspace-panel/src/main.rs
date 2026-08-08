@@ -133,6 +133,17 @@ fn build_ui(app: &gtk::Application) {
     spacer.set_vexpand(true);
     root.append(&spacer);
 
+    // Update badge: hidden until the daemon reports a newer release.
+    let update_badge = gtk::Button::with_label("↑");
+    update_badge.add_css_class("update-badge");
+    update_badge.set_visible(false);
+    update_badge.connect_clicked(|_| {
+        let _ = std::process::Command::new("xdg-open")
+            .arg("https://github.com/HarkerSoftware/omarchy-workspaces/releases/latest")
+            .spawn();
+    });
+    root.append(&update_badge);
+
     let add_button = gtk::Button::with_label("+");
     add_button.add_css_class("add-project");
     add_button.set_tooltip_text(Some("New project"));
@@ -292,6 +303,8 @@ fn build_ui(app: &gtk::Application) {
         drag,
         #[strong]
         window,
+        #[strong]
+        update_badge,
         async move {
             while let Ok(update) = updates.recv().await {
                 match update {
@@ -307,6 +320,16 @@ fn build_ui(app: &gtk::Application) {
                         rebuild_rows(&list, &ui, &projects, &requests, &settings_window, &drag);
                         sync_exclusive_zone(&window, &ui);
                     }
+                    UiUpdate::UpdateAvailable(version) => match version {
+                        Some(version) => {
+                            update_badge.set_tooltip_text(Some(&format!(
+                                "omarchy-workspaces v{version} is available — \
+                                     install with: sudo pacman -Syu"
+                            )));
+                            update_badge.set_visible(true);
+                        }
+                        None => update_badge.set_visible(false),
+                    },
                     UiUpdate::ProjectDetails(project) => {
                         if let Some(open) = settings_window.borrow().as_ref() {
                             open.populate(&project);

@@ -66,6 +66,8 @@ pub struct Config {
     pub launcher: Launcher,
     /// Logging.
     pub log: Log,
+    /// Update checking.
+    pub updates: Updates,
 }
 
 /// `[general]` section.
@@ -130,6 +132,26 @@ impl Default for Launcher {
     fn default() -> Self {
         Self {
             default_timeout_ms: 15_000,
+        }
+    }
+}
+
+/// `[updates]` section.
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct Updates {
+    /// Whether the daemon periodically checks GitHub for a newer release.
+    /// Checking only notifies — installing stays with pacman.
+    pub check: bool,
+    /// Hours between checks.
+    pub interval_hours: u64,
+}
+
+impl Default for Updates {
+    fn default() -> Self {
+        Self {
+            check: true,
+            interval_hours: 24,
         }
     }
 }

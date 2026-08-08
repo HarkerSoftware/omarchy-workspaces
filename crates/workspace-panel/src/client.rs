@@ -22,6 +22,8 @@ pub enum UiUpdate {
     Projects(Vec<ProjectSummary>),
     /// The daemon is unreachable.
     Disconnected,
+    /// A newer daemon release is known (or `None` again after an update).
+    UpdateAvailable(Option<String>),
     /// Reply to `Get`: the full project definition as JSON.
     ProjectDetails(serde_json::Value),
     /// Reply to `Capture`: freshly detected app slots as JSON.
@@ -217,7 +219,14 @@ async fn connection(
                         let update = match kind {
                             Pending::Snapshot => {
                                 match serde_json::from_value::<Snapshot>(result) {
-                                    Ok(snapshot) => UiUpdate::Projects(snapshot.projects),
+                                    Ok(snapshot) => {
+                                        let _ = updates
+                                            .send(UiUpdate::UpdateAvailable(
+                                                snapshot.update_available.clone(),
+                                            ))
+                                            .await;
+                                        UiUpdate::Projects(snapshot.projects)
+                                    }
                                     Err(_) => continue,
                                 }
                             }

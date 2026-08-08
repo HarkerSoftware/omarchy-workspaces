@@ -163,3 +163,16 @@ window#workspace-panel {
 .project-row:focus-within {
   outline: none;
 }
+
+.update-badge {
+  margin: 6px;
+  min-height: 28px;
+  border-radius: 8px;
+  background-color: alpha(@panel_open, 0.35);
+  color: @panel_fg;
+  font-weight: 700;
+}
+
+.update-badge:hover {
+  background-color: alpha(@panel_open, 0.6);
+}
