@@ -39,5 +39,13 @@ done
 }
 
 echo "==> Watching run $run_id (safe to Ctrl-C; the release continues in CI)"
-gh run watch "$run_id" -R "$repo" --exit-status
+gh run watch "$run_id" -R "$repo" --exit-status || true
+# `gh run watch --exit-status` has been seen reporting success while a
+# job failed; trust only the recorded conclusion.
+conclusion=$(gh run view "$run_id" -R "$repo" --json conclusion --jq .conclusion)
+if [[ "$conclusion" != "success" ]]; then
+  echo "error: release run concluded '$conclusion'" >&2
+  echo "       inspect: gh run view $run_id -R $repo --log-failed" >&2
+  exit 1
+fi
 echo "==> Done: GitHub release published, pacman repo updated."
